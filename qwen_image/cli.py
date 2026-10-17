@@ -2,6 +2,7 @@
 
     qwen-image generate -p "a red fox in snow" -o fox.png
     qwen-image edit -i fox.png -p "make it night" --box 100,100,400,400
+    qwen-image pose -i hero.png --pose stick_figure.png --pose-type skeleton
     qwen-image combine -i cat.png -i hat.png -p "the cat wearing the hat"
     qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight"
     qwen-image models list | download VARIANT
@@ -90,6 +91,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--mask-mode", choices=["annotate", "reference"], default="annotate")
     p.add_argument("--no-keep-outside", dest="keep_outside", action="store_false", help="let the model change pixels outside the selection")
     p.add_argument("--feather", type=float, default=8.0)
+    _add_common(p)
+
+    p = sub.add_parser("pose", help="re-pose an image's subject to match a pose reference")
+    p.add_argument("--image", "-i", required=True, help="image whose subject should be re-posed")
+    p.add_argument("--pose", required=True, help="pose reference: a character/photo in the pose, or a stick figure / sketch")
+    p.add_argument("--prompt", "-p", default="", help="optional extra instructions")
+    p.add_argument("--pose-type", choices=["auto", "character", "skeleton", "sketch"], default="auto")
+    p.add_argument("--no-keep-background", dest="keep_background", action="store_false", help="allow the background to change")
     _add_common(p)
 
     p = sub.add_parser("combine", help="combine subjects from 2-10 images into a new image")
@@ -211,6 +220,8 @@ def run_local(args) -> tuple[list, dict]:
     elif args.command == "edit":
         image = _open(args.image)
         r = engine.edit(image, args.prompt, _local_mask(args, image.size), args.mask_mode, args.keep_outside, args.feather, opts, hooks)
+    elif args.command == "pose":
+        r = engine.pose(_open(args.image), _open(args.pose), args.prompt, args.pose_type, args.keep_background, opts, hooks)
     elif args.command == "combine":
         r = engine.combine([_open(p) for p in args.image], args.prompt, opts, hooks)
     elif args.command == "isolate":
@@ -256,6 +267,10 @@ def run_remote(args) -> tuple[list, dict]:
         data["prompt"] = args.prompt
         for p in args.image:
             attach("images", p)
+    elif args.command == "pose":
+        attach("image", args.image)
+        attach("pose", args.pose)
+        data |= {"prompt": args.prompt, "pose_type": args.pose_type, "keep_background": str(args.keep_background).lower()}
     elif args.command in ("edit", "isolate"):
         attach("image", args.image)
         if args.mask:

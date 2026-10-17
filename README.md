@@ -6,6 +6,7 @@ A custom front end for [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Image-2.1
 |---|---|
 | **generate** | Text-to-image. You can also pass reference images (up to 10) to borrow a subject, style or layout. Transparent (RGBA) output is supported. |
 | **edit** | Edits an image from an instruction. An optional selection limits the edit to one region, and pixels outside that region are kept by default. |
+| **pose** | Re-poses the subject of one image to match a pose reference. The reference can be another character, a photo, or a stick-figure or sketch drawing. Identity, clothing, style and background stay the same. |
 | **combine** | Combines subjects from 2–10 images into one new image. |
 | **isolate** | Cuts a selected subject out of the image. The model removes the background and everything else and returns an RGBA cutout. This works on sub-elements too, such as an item a character holds or one object in the background. |
 
@@ -50,6 +51,7 @@ Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all th
 |---|---|---|
 | POST | `/api/generate` | `prompt`, optional `references[]` files |
 | POST | `/api/edit` | `image`, `prompt`, optional `mask` file or `selection` JSON, `mask_mode`, `keep_outside` |
+| POST | `/api/pose` | `image` (subject), `pose` (reference) files, optional `prompt`, `pose_type` (`auto`/`character`/`skeleton`/`sketch`), `keep_background` |
 | POST | `/api/combine` | `images[]` (2–10), `prompt` |
 | POST | `/api/isolate` | `image`, `mask` file or `selection` JSON, `description`, `method`, `crop`, `clip`, `keep_canvas` |
 | GET | `/api/models` | variants with download/loaded state |
@@ -73,6 +75,7 @@ curl -F image=@scene.png -F 'selection={"polygons":[[[120,80],[300,90],[290,400]
 ```bash
 qwen-image generate -p "a red fox in snow" -o fox.png [-r ref.png ...] [--transparent]
 qwen-image edit -i fox.png -p "make it night time" [--box 100,100,400,400 | --polygon "x,y x,y x,y" | --mask m.png]
+qwen-image pose -i hero.png --pose stick_figure.png --pose-type skeleton -o hero_posed.png
 qwen-image combine -i cat.png -i hat.png -p "the cat from the first image wearing the hat from the second" -o out.png
 qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight" -o knight.png
 ```
@@ -92,6 +95,8 @@ Both modes show the model's current estimate of the *finished* image, recovered 
 From the CLI, add `--preview-dir steps/` to save every preview as `step_NN.png`. This works locally and with `--api`.
 
 ## How selections reach the model
+
+**Pose** sends the pose reference and the subject image as two condition images, with the subject last so the output keeps its aspect ratio. The instruction asks the model to copy only the pose: the placement and angles of the head, torso, limbs, hands and feet, not the reference's appearance.
 
 The diffusers pipeline has no mask input. A selection is passed to the model in one of these ways:
 

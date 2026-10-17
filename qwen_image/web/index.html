@@ -34,6 +34,7 @@
         <div class="modes" role="radiogroup">
           <button data-mode="generate" class="active">Generate</button>
           <button data-mode="edit">Edit</button>
+          <button data-mode="pose">Pose</button>
           <button data-mode="combine">Combine</button>
           <button data-mode="isolate">Isolate</button>
         </div>
@@ -43,6 +44,27 @@
           <span data-role="prompt-label">Prompt</span>
           <textarea data-role="prompt" rows="4" placeholder="Describe the image…"></textarea>
         </label>
+
+        <div class="slots" data-show="pose">
+          <div class="field">
+            <span>Pose reference</span>
+            <label class="slot" data-slot="pose">
+              <input type="file" accept="image/*" hidden>
+              <img alt="" hidden>
+              <span class="slot-empty">Drop or click: a character, photo or stick figure in the pose</span>
+              <button type="button" class="slot-clear" hidden aria-label="Remove image">×</button>
+            </label>
+          </div>
+          <div class="field">
+            <span>Subject to re-pose</span>
+            <label class="slot" data-slot="subject">
+              <input type="file" accept="image/*" hidden>
+              <img alt="" hidden>
+              <span class="slot-empty">Drop or click: the image to change</span>
+              <button type="button" class="slot-clear" hidden aria-label="Remove image">×</button>
+            </label>
+          </div>
+        </div>
 
         <div class="field" data-show="generate combine">
           <span data-role="images-label">Reference images</span>
@@ -58,7 +80,7 @@
           <div class="grid">
             <label class="field wide"><span>Model variant</span><select data-role="variant"></select></label>
 
-            <label class="field" data-show="generate combine edit"><span>Aspect</span>
+            <label class="field" data-show="generate combine edit pose"><span>Aspect</span>
               <select data-role="aspect">
                 <option value="auto">Auto</option>
                 <option value="1:1">1:1</option><option value="4:3">4:3</option><option value="3:4">3:4</option>
@@ -78,7 +100,7 @@
             <label class="field"><span>CFG</span><input type="number" min="1" max="15" step="0.5" value="1" data-role="cfg"></label>
             <label class="field"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images"></label>
             <label class="field wide" data-show-cfg><span>Negative prompt</span><input type="text" data-role="negative" placeholder="used when CFG &gt; 1"></label>
-            <label class="check wide" data-show="generate edit combine"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
+            <label class="check wide" data-show="generate edit pose combine"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
             <label class="field wide"><span>Live preview while generating</span>
               <select data-role="preview">
                 <option value="fast" selected>Fast (approximate, every step)</option>
@@ -86,6 +108,16 @@
                 <option value="off">Off</option>
               </select>
             </label>
+
+            <label class="field wide" data-show="pose"><span>Pose reference is</span>
+              <select data-role="pose-type">
+                <option value="auto">Detect automatically</option>
+                <option value="character">A character or photo</option>
+                <option value="skeleton">A stick figure / skeleton</option>
+                <option value="sketch">A sketch or mannequin drawing</option>
+              </select>
+            </label>
+            <label class="check wide" data-show="pose"><input type="checkbox" checked data-role="keep-background"> Keep the subject image’s background</label>
 
             <label class="field wide" data-show="edit"><span>Show selection to model as</span>
               <select data-role="mask-mode">

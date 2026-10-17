@@ -38,6 +38,11 @@ const MODES = {
     promptLabel: "Edit instruction", placeholder: "Change the background to a sunset beach…",
     run: "Apply edit",
   },
+  pose: {
+    help: "Make the subject of one image take the pose from another. The pose reference can be a character, a photo, or a simple stick figure.",
+    promptLabel: "Extra instructions (optional)", placeholder: "keep the sword in the right hand…",
+    run: "Apply pose",
+  },
   combine: {
     help: "Put subjects from several images into one new scene. Refer to them in order (first image, second image…).",
     promptLabel: "Prompt", placeholder: "The character from the first image holding the lamp from the second image, in a forest at night…",
@@ -113,7 +118,7 @@ class Workspace {
   // --- persistence (settings only; images live in memory)
   settingRoles() {
     return ["prompt", "variant", "aspect", "resolution", "steps", "seed", "cfg", "num-images", "negative",
-      "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas"];
+      "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "pose-type", "keep-background"];
   }
   snapshot() {
     const s = { name: this.name, mode: this.mode, settings: {} };
@@ -149,6 +154,8 @@ class Workspace {
     multiInput.onchange = () => { this.addMulti([...multiInput.files]); multiInput.value = ""; };
     this.dropZone(this.r("multi-drop"), files => this.addMulti(files));
 
+    this.bindSlots();
+
     // single image (editor)
     for (const role of ["single-input", "single-input-2"]) {
       const input = this.r(role);
@@ -172,6 +179,36 @@ class Workspace {
       const files = [...e.dataTransfer.files].filter(f => f.type.startsWith("image/"));
       if (files.length) onFiles(files);
     });
+  }
+
+  // --- named single-image slots (e.g. pose reference + subject)
+  bindSlots() {
+    this.slots = {};
+    $$("[data-slot]", this.el).forEach(slot => {
+      const name = slot.dataset.slot;
+      const input = slot.querySelector("input");
+      input.onchange = () => { if (input.files[0]) this.setSlot(name, input.files[0]); input.value = ""; };
+      slot.querySelector(".slot-clear").onclick = e => { e.preventDefault(); e.stopPropagation(); this.setSlot(name, null); };
+      slot.querySelector("img").onclick = e => { e.preventDefault(); lightbox(e.target.src); };
+      this.dropZone(slot, files => this.setSlot(name, files[0]));
+    });
+  }
+
+  setSlot(name, blob) {
+    const old = this.slots[name];
+    if (old) URL.revokeObjectURL(old.url);
+    this.slots[name] = blob ? blobItem(blob, blob.name || `${name}.png`) : null;
+    const slot = $(`[data-slot="${name}"]`, this.el);
+    const img = slot.querySelector("img");
+    img.hidden = !blob;
+    if (blob) img.src = this.slots[name].url;
+    slot.querySelector(".slot-empty").hidden = !!blob;
+    slot.querySelector(".slot-clear").hidden = !blob;
+  }
+
+  // The slots shown for the current mode, in order.
+  modeSlots() {
+    return $$("[data-slot]", this.el).filter(s => !s.closest("[data-show]")?.hidden).map(s => s.dataset.slot);
   }
 
   setMode(mode) {
@@ -394,6 +431,15 @@ class Workspace {
       f.append("transparent", this.r("transparent").checked);
       const field = this.mode === "generate" ? "references" : "images";
       this.multi.forEach(item => f.append(field, item.blob, item.name));
+    } else if (this.mode === "pose") {
+      if (!this.slots.pose) throw new Error("Add a pose reference image.");
+      if (!this.slots.subject) throw new Error("Add the image whose subject should be re-posed.");
+      f.append("pose", this.slots.pose.blob, this.slots.pose.name);
+      f.append("image", this.slots.subject.blob, this.slots.subject.name);
+      f.append("prompt", prompt);
+      f.append("pose_type", this.r("pose-type").value);
+      f.append("keep_background", this.r("keep-background").checked);
+      f.append("transparent", this.r("transparent").checked);
     } else {
       if (!this.single) throw new Error("Open an image first.");
       f.append("image", this.single.blob, this.single.name);
@@ -554,6 +600,7 @@ class Workspace {
       card.querySelector('[data-a="isolate"]').onclick = () => { this.setMode("isolate"); this.setSingle(item.blob); };
       card.querySelector('[data-a="ref"]').onclick = () => {
         if (this.mode === "edit" || this.mode === "isolate") this.setSingle(item.blob);
+        else if (this.mode === "pose") this.setSlot("subject", item.blob);
         else this.addMulti([new File([item.blob], item.name, { type: "image/png" })]);
       };
       card.querySelector('[data-a="tab"]').onclick = () => {
@@ -587,7 +634,8 @@ class Workspace {
 
   destroy() {
     if (this.job) this.cancel();
-    for (const item of [...this.multi, ...this.results, this.single].filter(Boolean)) URL.revokeObjectURL(item.url);
+    const slots = Object.values(this.slots || {});
+    for (const item of [...this.multi, ...this.results, ...slots, this.single].filter(Boolean)) URL.revokeObjectURL(item.url);
     this.el.remove();
   }
 }
@@ -769,7 +817,9 @@ document.addEventListener("paste", e => {
   const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
   if (!files.length) return;
   e.preventDefault();
-  if (ws.mode === "edit" || ws.mode === "isolate") ws.setSingle(files[0]);
+  const slots = ws.modeSlots();
+  if (slots.length) ws.setSlot(slots.find(n => !ws.slots[n]) || slots[slots.length - 1], files[0]);
+  else if (ws.mode === "edit" || ws.mode === "isolate") ws.setSingle(files[0]);
   else ws.addMulti(files);
 });
 

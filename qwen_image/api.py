@@ -19,7 +19,7 @@ from PIL import Image, ImageOps, UnidentifiedImageError
 
 from . import __version__
 from . import selection as sel
-from .engine import Engine, Options
+from .engine import POSE_TYPES, Engine, Options
 from .jobs import TERMINAL, Job, JobManager
 from .preview import MODES as PREVIEW_MODES
 from .variants import DEFAULT_VARIANT, get_variant, list_variants
@@ -207,6 +207,32 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         job = jobs.submit(
             "edit", params,
             lambda hooks: engine.edit(img, prompt, m, mask_mode, keep_outside, feather, opts, hooks, v),
+        )
+        return await respond(job, wait)
+
+    @app.post("/api/pose", status_code=202, summary="Re-pose the subject of an image to match a pose reference")
+    async def pose(
+        image: UploadFile = File(..., description="Image whose subject should be re-posed"),
+        pose: UploadFile = File(..., description="Pose reference: a character/photo in the pose, or a stick figure / sketch"),
+        prompt: str = Form("", description="Optional extra instructions"),
+        pose_type: str = Form("auto", description="'auto', 'character', 'skeleton' or 'sketch'"),
+        keep_background: bool = Form(True, description="Keep the subject image's background and framing"),
+        width: int | None = f["width"], height: int | None = f["height"], steps: int | None = f["steps"],
+        seed: int | None = f["seed"], cfg: float = f["cfg"], negative_prompt: str | None = f["negative_prompt"],
+        num_images: int = f["num_images"], resolution: int = f["resolution"], transparent: bool = f["transparent"],
+        variant: str | None = f["variant"], wait: bool = f["wait"],
+        preview: str = f["preview"], preview_every: int | None = f["preview_every"],
+    ):
+        if pose_type not in POSE_TYPES:
+            raise HTTPException(400, f"pose_type must be one of {', '.join(POSE_TYPES)}")
+        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview, preview_every)
+        img = _read_image(image, "image")
+        ref = _read_image(pose, "pose")
+        v = _check_variant(variant)
+        params = {"prompt": prompt, "pose_type": pose_type, "keep_background": keep_background} | opts.__dict__
+        job = jobs.submit(
+            "pose", params,
+            lambda hooks: engine.pose(img, ref, prompt, pose_type, keep_background, opts, hooks, v),
         )
         return await respond(job, wait)
 

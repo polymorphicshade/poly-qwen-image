@@ -23,6 +23,14 @@ log = logging.getLogger(__name__)
 
 MAX_REFERENCES = 10
 
+# How a pose reference is described to the model, by pose_type.
+POSE_TYPES = {
+    "auto": "use the body pose of the figure in the first image",
+    "character": "a character or person demonstrating the pose",
+    "skeleton": "a stick-figure or skeleton drawing of the pose; read the limbs and joints as a human body",
+    "sketch": "a rough sketch or mannequin drawing of the pose",
+}
+
 
 class Cancelled(Exception):
     pass
@@ -267,6 +275,49 @@ class Engine:
                 img = img.resize(image.size, Image.Resampling.LANCZOS)
             out.append(img if opts.transparent else _rgb_if_opaque(img))
         return self._result(out, seed, full, masked=has_mask, mask_mode=mask_mode if has_mask else None)
+
+    def pose(
+        self,
+        image: Image.Image,
+        pose_ref: Image.Image,
+        prompt: str = "",
+        pose_type: str = "auto",
+        keep_background: bool = True,
+        opts: Options | None = None,
+        hooks: Hooks | None = None,
+        variant: str | None = None,
+    ) -> Result:
+        """Re-pose the subject of ``image`` to match the pose shown in ``pose_ref``.
+
+        ``pose_ref`` can be another character or photo in the target pose, or a drawing of the
+        pose (stick figure, skeleton, mannequin sketch); ``pose_type`` says which, or ``auto``.
+        Both images are passed as conditions with the subject image last, so the output keeps
+        its aspect ratio; only the pose is taken from the reference, never its appearance.
+        """
+        opts, hooks = opts or Options(), hooks or Hooks()
+        if pose_type not in POSE_TYPES:
+            raise ValueError(f"pose_type must be one of {', '.join(POSE_TYPES)}")
+        source = POSE_TYPES[pose_type]
+        parts = [
+            f"Change the pose of the subject in the second image so that it exactly matches the pose shown in the first image ({source}).",
+            "Match the placement and angles of the head, torso, arms, hands, legs and feet.",
+            "Keep the subject of the second image the same: same identity, face, hairstyle, clothing, colours, "
+            "body proportions and art style. Take only the pose from the first image, not its appearance, clothing or style.",
+        ]
+        if keep_background:
+            parts.append("Keep the background, lighting and framing of the second image.")
+        if prompt.strip():
+            parts.append(prompt.strip().rstrip(".") + ".")
+        full = " ".join(parts)
+        if opts.transparent:
+            full = transparent_prompt(full)
+        imgs, seed = self._run(full, [pose_ref, image], opts, hooks, variant)
+        out = []
+        for img in imgs:
+            if opts.width is None and opts.height is None:
+                img = img.resize(image.size, Image.Resampling.LANCZOS)
+            out.append(img if opts.transparent else _rgb_if_opaque(img))
+        return self._result(out, seed, full, pose_type=pose_type)
 
     def combine(
         self,
