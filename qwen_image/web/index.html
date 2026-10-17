@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Qwen Image Studio</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Qwen Image Studio</div>
+    <nav class="tabs" id="tabs" role="tablist"></nav>
+    <button class="icon-btn" id="new-tab" title="New workspace tab (Ctrl+Alt+T)" aria-label="New tab">+</button>
+    <div class="spacer"></div>
+    <button class="model-pill" id="model-pill" title="Manage models">
+      <span class="dot" id="model-dot"></span><span id="model-status">No model loaded</span>
+    </button>
+  </header>
+
+  <main id="workspaces"></main>
+
+  <dialog id="models-dialog">
+    <form method="dialog" class="dialog-head">
+      <h2>Model variants</h2>
+      <button class="icon-btn" aria-label="Close">×</button>
+    </form>
+    <p class="hint">Variants download automatically the first time they are used. Quantized variants need far less VRAM; GGUF Q4_K_M is a good default for 12–16&nbsp;GB GPUs.</p>
+    <div id="models-list" class="models-list">Loading…</div>
+  </dialog>
+
+  <template id="workspace-template">
+    <section class="workspace" role="tabpanel">
+      <aside class="controls">
+        <div class="modes" role="radiogroup">
+          <button data-mode="generate" class="active">Generate</button>
+          <button data-mode="edit">Edit</button>
+          <button data-mode="combine">Combine</button>
+          <button data-mode="isolate">Isolate</button>
+        </div>
+        <p class="mode-help" data-role="mode-help"></p>
+
+        <label class="field">
+          <span data-role="prompt-label">Prompt</span>
+          <textarea data-role="prompt" rows="4" placeholder="Describe the image…"></textarea>
+        </label>
+
+        <div class="field" data-show="generate combine">
+          <span data-role="images-label">Reference images</span>
+          <div class="thumbs" data-role="thumbs"></div>
+          <label class="drop" data-role="multi-drop">
+            <input type="file" accept="image/*" multiple hidden data-role="multi-input">
+            Drop images or click to add
+          </label>
+        </div>
+
+        <details class="advanced" open>
+          <summary>Settings</summary>
+          <div class="grid">
+            <label class="field wide"><span>Model variant</span><select data-role="variant"></select></label>
+
+            <label class="field" data-show="generate combine edit"><span>Aspect</span>
+              <select data-role="aspect">
+                <option value="auto">Auto</option>
+                <option value="1:1">1:1</option><option value="4:3">4:3</option><option value="3:4">3:4</option>
+                <option value="3:2">3:2</option><option value="2:3">2:3</option>
+                <option value="16:9">16:9</option><option value="9:16">9:16</option>
+              </select>
+            </label>
+            <label class="field"><span>Resolution</span>
+              <select data-role="resolution">
+                <option>768</option><option selected>1024</option><option>1328</option><option>1536</option><option>2048</option>
+              </select>
+            </label>
+            <label class="field"><span>Steps</span><input type="number" min="1" max="100" placeholder="40" data-role="steps"></label>
+            <label class="field"><span>Seed</span>
+              <span class="inline"><input type="number" placeholder="random" data-role="seed"><button type="button" class="icon-btn small" data-role="seed-reuse" title="Reuse last seed">↺</button></span>
+            </label>
+            <label class="field"><span>CFG</span><input type="number" min="1" max="15" step="0.5" value="1" data-role="cfg"></label>
+            <label class="field"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images"></label>
+            <label class="field wide" data-show-cfg><span>Negative prompt</span><input type="text" data-role="negative" placeholder="used when CFG &gt; 1"></label>
+            <label class="check wide" data-show="generate edit combine"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
+
+            <label class="field wide" data-show="edit"><span>Show selection to model as</span>
+              <select data-role="mask-mode">
+                <option value="annotate">Red outline on the image</option>
+                <option value="reference">Separate mask image</option>
+              </select>
+            </label>
+            <label class="check wide" data-show="edit"><input type="checkbox" checked data-role="keep-outside"> Keep pixels outside the selection unchanged</label>
+
+            <label class="field wide" data-show="isolate"><span>Method</span>
+              <select data-role="method">
+                <option value="model">AI matte (follows the subject’s edges)</option>
+                <option value="mask">Selection as-is (instant, no model)</option>
+              </select>
+            </label>
+            <label class="check wide" data-show="isolate"><input type="checkbox" checked data-role="crop"> Zoom in on the selection (best for small items)</label>
+            <label class="check wide" data-show="isolate"><input type="checkbox" checked data-role="clip"> Discard anything outside the selection</label>
+            <label class="check wide" data-show="isolate"><input type="checkbox" checked data-role="restore"> Keep original colours</label>
+            <label class="check wide" data-show="isolate"><input type="checkbox" data-role="keep-canvas"> Keep full canvas size</label>
+          </div>
+        </details>
+
+        <div class="run-row">
+          <button class="primary" data-role="run">Generate</button>
+          <button class="ghost" data-role="cancel" hidden>Cancel</button>
+        </div>
+        <div class="progress" data-role="progress" hidden><div class="bar"></div></div>
+        <p class="status" data-role="status" aria-live="polite"></p>
+      </aside>
+
+      <div class="stage">
+        <div class="editor" data-show="edit isolate">
+          <div class="toolbar" data-role="toolbar">
+            <div class="seg">
+              <button data-tool="lasso" class="active" title="Lasso (L)">Lasso</button>
+              <button data-tool="box" title="Rectangle (R)">Box</button>
+              <button data-tool="brush" title="Brush (B)">Brush</button>
+              <button data-tool="erase" title="Eraser (E)">Erase</button>
+            </div>
+            <label class="inline small-label">Size <input type="range" min="4" max="200" value="40" data-role="brush-size"></label>
+            <label class="inline small-label"><input type="checkbox" data-role="subtract"> Subtract</label>
+            <div class="spacer"></div>
+            <button data-role="undo" title="Undo (Ctrl+Z)">Undo</button>
+            <button data-role="clear-sel">Clear selection</button>
+            <label class="btn-like">Open image<input type="file" accept="image/*" hidden data-role="single-input"></label>
+          </div>
+          <div class="canvas-wrap" data-role="canvas-wrap">
+            <canvas data-role="canvas"></canvas>
+            <label class="drop big" data-role="single-drop">
+              <input type="file" accept="image/*" hidden data-role="single-input-2">
+              <strong>Drop an image here</strong><span>or click to choose one</span>
+            </label>
+          </div>
+          <p class="hint" data-role="editor-hint"></p>
+        </div>
+
+        <div class="results-head">
+          <h3>Results</h3>
+          <button class="ghost small" data-role="clear-results">Clear</button>
+        </div>
+        <div class="results" data-role="results">
+          <p class="empty">Results appear here.</p>
+        </div>
+      </div>
+    </section>
+  </template>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
