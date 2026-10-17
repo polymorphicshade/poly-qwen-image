@@ -13,7 +13,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field, fields
 
-from PIL import Image, ImageChops
+from PIL import Image, ImageChops, ImageOps
 
 from . import selection as sel
 from .preview import Previewer, output_dims
@@ -434,6 +434,8 @@ class Engine:
         src = image.convert("RGBA")
         box = sel.padded_bbox(mask) if crop else (0, 0, *image.size)
         work, work_mask = src.crop(box), mask.crop(box)
+        # A selection covering everything means "find the subject yourself": nothing to outline.
+        whole = work_mask.getextrema()[0] == 255
         seed = -1
         full = ""
 
@@ -441,14 +443,17 @@ class Engine:
             out = sel.apply_alpha(work, sel.feather(work_mask, 1.0))
             outs = [out]
         elif method == "model":
-            subject = description.strip() or "the subject"
+            subject = description.strip() or ("the subject" if not whole else "the main subject")
+            where = "" if whole else " outlined in red"
+            outline_note = "" if whole else "Remove the red outline and everything else"
             full = transparent_prompt(
-                f"Extract {subject} outlined in red from the input image as a standalone cutout. "
-                f"Remove the red outline and everything else, including the background and all other objects. "
+                f"Extract {subject}{where} from the input image as a standalone cutout. "
+                f"{outline_note or 'Remove everything else'}, including the background and all other objects. "
                 f"Keep {subject} exactly as it appears, with the same pose, colours and details"
             )
             o = Options(**{**opts.__dict__, "transparent": True, "width": None, "height": None})
-            imgs, seed = self._run(full, [sel.annotate(work, work_mask)], o, hooks, variant)
+            condition = work if whole else sel.annotate(work, work_mask)
+            imgs, seed = self._run(full, [condition], o, hooks, variant)
             # Clip a little outside the outline so the model's edge is kept, not the user's.
             clip_mask = sel.feather(sel.dilate(work_mask, sel.outline_width(work.size) * 2), 2.0)
             outs = []
@@ -477,6 +482,75 @@ class Engine:
         else:
             outs = [_trim(img) for img in outs]
         return self._result(outs, seed, full, method=method, box=list(box))
+
+    def background(
+        self,
+        image: Image.Image,
+        background: Image.Image,
+        mask: Image.Image | None = None,
+        prompt: str = "",
+        method: str = "model",
+        keep_subject: bool = False,
+        feather_px: float = 2.0,
+        opts: Options | None = None,
+        hooks: Hooks | None = None,
+        variant: str | None = None,
+    ) -> Result:
+        """Put the subject of ``image`` in front of the background shown in ``background``.
+
+        ``method="model"`` (default) passes the background reference and the subject image to
+        the model, which repaints the scene behind the subject with matching lighting and
+        perspective; ``prompt`` adds extra instructions. An optional ``mask`` outlines which
+        subject to keep, and ``keep_subject`` pastes the original pixels inside it back (only
+        sensible for a tight selection).
+
+        ``method="composite"`` cuts the subject out with an AI matte (as :meth:`isolate`, guided
+        by ``mask`` if given, ``prompt`` naming the subject) and lays it over the background image
+        resized to cover the frame - nothing is regenerated, but lighting is not adapted.
+        """
+        opts, hooks = opts or Options(), hooks or Hooks()
+        has_mask = not sel.is_empty(mask)
+
+        if method == "composite":
+            matte_mask = mask if has_mask else Image.new("L", image.size, 255)
+            cut = self.isolate(
+                image, matte_mask, prompt, method="model", crop=has_mask, keep_canvas=True, clip=has_mask,
+                restore_pixels=True, opts=opts, hooks=hooks, variant=variant,
+            )
+            plate = ImageOps.fit(background.convert("RGBA"), image.size, Image.Resampling.LANCZOS)
+            outs = []
+            for subject in cut.images:
+                composed = plate.copy()
+                composed.alpha_composite(subject.convert("RGBA"))
+                outs.append(_rgb_if_opaque(composed))
+            return self._result(outs, cut.seed, cut.prompt, method=method, masked=has_mask)
+        if method != "model":
+            raise ValueError("method must be 'model' or 'composite'")
+
+        subject = "the subject outlined in red in the second image" if has_mask else "the main subject of the second image"
+        parts = [
+            "Replace the background of the second image with the background from the first image: the same setting, "
+            "scenery, colours and atmosphere.",
+            f"Keep {subject} exactly unchanged, with the same pose, appearance, size and position in the frame.",
+            "Adjust the lighting and shadows on the subject so it sits naturally in the new background.",
+        ]
+        if has_mask:
+            parts.append("Remove the red outline.")
+        if prompt.strip():
+            parts.append(prompt.strip().rstrip(".") + ".")
+        full = " ".join(parts)
+        target = sel.annotate(image, mask) if has_mask else image
+        imgs, seed = self._run(full, [background, target], opts, hooks, variant)
+        outs = []
+        for img in imgs:
+            if opts.width is None and opts.height is None:
+                img = img.resize(image.size, Image.Resampling.LANCZOS)
+            if has_mask and keep_subject:
+                soft = sel.feather(mask, feather_px)
+                mode = "RGBA" if "A" in img.getbands() else "RGB"
+                img = Image.composite(image.convert(mode), img.convert(mode), soft.resize(img.size))
+            outs.append(_rgb_if_opaque(img))
+        return self._result(outs, seed, full, method=method, masked=has_mask, keep_subject=keep_subject)
 
 
 def _trim(img: Image.Image, pad: int = 4) -> Image.Image:

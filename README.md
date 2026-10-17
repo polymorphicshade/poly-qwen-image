@@ -10,6 +10,7 @@ A custom front end for [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Image-2.1
 | **face** | Gives the subject of an image the face from a reference image, to keep characters consistent across images. Hair and expression are kept by default; either can be transferred too. An optional selection picks one face among several. |
 | **combine** | Combines subjects from 2–10 images into one new image. |
 | **isolate** | Cuts a selected subject out of the image. The model removes the background and everything else and returns an RGBA cutout. This works on sub-elements too, such as an item a character holds or one object in the background. |
+| **background** | Replaces an image's background with the one from another image and keeps the subject. The model can repaint the scene behind the subject with matching lighting, or the subject can be cut out and pasted over the image. |
 
 You can choose between several model variants, including quantized ones. Each variant downloads from the Hugging Face Hub the first time it is used.
 
@@ -56,6 +57,7 @@ Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all th
 | POST | `/api/face` | `image` (target), `face` (reference) files, optional `mask`/`selection`, `prompt`, `keep_hair`, `keep_expression`, `keep_outside` |
 | POST | `/api/combine` | `images[]` (2–10), `prompt` |
 | POST | `/api/isolate` | `image`, `mask` file or `selection` JSON, `description`, `method`, `crop`, `clip`, `keep_canvas` |
+| POST | `/api/background` | `image` (subject), `background` files, optional `mask`/`selection`, `prompt`, `method` (`model`/`composite`), `keep_subject` |
 | GET | `/api/models` | variants with download/loaded state |
 | POST | `/api/models/load` · `/api/models/download` · `/api/models/unload` | model management |
 | GET / DELETE | `/api/jobs/{id}` | poll or cancel a job |
@@ -81,6 +83,7 @@ qwen-image pose -i hero.png --pose stick_figure.png --pose-type skeleton -o hero
 qwen-image face -i scene.png --face hero_portrait.png [--box 300,80,420,220] [--transfer-hair] -o scene_hero.png
 qwen-image combine -i cat.png -i hat.png -p "the cat from the first image wearing the hat from the second" -o out.png
 qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight" -o knight.png
+qwen-image background -i portrait.png --background beach.png [--method composite] -o portrait_beach.png
 ```
 
 By default each command loads the model in-process. Add `--api http://127.0.0.1:7860` to run the command on a server that already has the model loaded. Use `--json` for machine-readable output, and `qwen-image <command> -h` to list every option.
@@ -107,6 +110,11 @@ The diffusers pipeline has no mask input. A selection is passed to the model in 
 
 - **Edit, `mask_mode=annotate`** (the default): the selected region is outlined in red on the input image, because Qwen-Image-2.1 was trained to follow circled or painted annotations. With `mask_mode=reference`, the mask is passed as a second condition image instead. With `keep_outside`, the result is blended back into the original using a feathered mask, so everything outside the selection keeps its original pixels.
 - **Isolate**: the image is first cropped around the selection, so small items fill the model's view. The selection is then outlined in red, and the model is asked for a transparent RGBA extraction using Qwen's recommended RGBA prompt. Its alpha matte is clipped to a slightly dilated copy of the selection. By default the original colours are restored, so the model only decides which pixels are part of the subject. `method=mask` skips the model and uses the selection as the matte.
+
+**Background** has two methods:
+
+- `model` sends the background reference and the subject image as two condition images. The model repaints everything except the subject, matching the lighting and perspective. A selection outlines which subject to keep. `keep_subject` pastes the original pixels inside the selection back, so use it only with a tight selection.
+- `composite` cuts the subject out with the same AI matte as **isolate**. Without a selection, the model finds the main subject itself. The cutout is then laid over the background image, scaled to cover the frame. Nothing is regenerated, so the lighting is not adapted.
 
 ## Development
 

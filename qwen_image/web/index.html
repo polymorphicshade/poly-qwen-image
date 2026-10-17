@@ -38,6 +38,7 @@
           <button data-mode="face">Face</button>
           <button data-mode="combine">Combine</button>
           <button data-mode="isolate">Isolate</button>
+          <button data-mode="background">Background</button>
         </div>
         <p class="mode-help" data-role="mode-help"></p>
 
@@ -74,6 +75,18 @@
               <input type="file" accept="image/*" hidden>
               <img alt="" hidden>
               <span class="slot-empty">Drop or click: an image showing the face (a clear, front-facing view works best)</span>
+              <button type="button" class="slot-clear" hidden aria-label="Remove image">×</button>
+            </label>
+          </div>
+        </div>
+
+        <div class="slots single" data-show="background">
+          <div class="field">
+            <span>New background from</span>
+            <label class="slot" data-slot="background">
+              <input type="file" accept="image/*" hidden>
+              <img alt="" hidden>
+              <span class="slot-empty">Drop or click: an image with the background you want</span>
               <button type="button" class="slot-clear" hidden aria-label="Remove image">×</button>
             </label>
           </div>
@@ -152,6 +165,14 @@
             <label class="check wide" data-show="isolate"><input type="checkbox" checked data-role="clip"> Discard anything outside the selection</label>
             <label class="check wide" data-show="isolate"><input type="checkbox" checked data-role="restore"> Keep original colours</label>
             <label class="check wide" data-show="isolate"><input type="checkbox" data-role="keep-canvas"> Keep full canvas size</label>
+
+            <label class="field wide" data-show="background"><span>Method</span>
+              <select data-role="bg-method">
+                <option value="model">Repaint the scene behind the subject (matches lighting)</option>
+                <option value="composite">Cut out the subject and paste it over the image</option>
+              </select>
+            </label>
+            <label class="check wide" data-show="background"><input type="checkbox" data-role="keep-subject"> Keep original pixels inside the selection (tight selections only)</label>
           </div>
         </details>
 
@@ -164,7 +185,7 @@
       </aside>
 
       <div class="stage">
-        <div class="editor" data-show="edit isolate face">
+        <div class="editor" data-show="edit isolate face background">
           <div class="toolbar" data-role="toolbar">
             <div class="seg">
               <button data-tool="lasso" class="active" title="Lasso (L)">Lasso</button>

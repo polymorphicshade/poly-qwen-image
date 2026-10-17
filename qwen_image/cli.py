@@ -6,6 +6,7 @@
     qwen-image face -i scene.png --face hero_portrait.png [--box 300,80,420,220]
     qwen-image combine -i cat.png -i hat.png -p "the cat wearing the hat"
     qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight"
+    qwen-image background -i portrait.png --background beach.png
     qwen-image models list | download VARIANT
     qwen-image serve --port 7860
 
@@ -129,6 +130,16 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-restore-pixels", dest="restore_pixels", action="store_false", help="use the model's colours, not the original's")
     _add_common(p, size=False)
 
+    p = sub.add_parser("background", help="replace an image's background with the one from another image")
+    p.add_argument("--image", "-i", required=True, help="image whose subject should be kept")
+    p.add_argument("--background", "-b", required=True, help="image whose background should be used")
+    _add_selection(p)
+    p.add_argument("--prompt", "-p", default="", help="model: extra instructions; composite: what the subject is")
+    p.add_argument("--method", choices=["model", "composite"], default="model",
+                   help="'model' repaints the scene behind the subject; 'composite' cuts it out and pastes it over")
+    p.add_argument("--keep-subject", action="store_true", help="model + selection: paste the original pixels inside the selection back")
+    _add_common(p)
+
     p = sub.add_parser("models", help="list or download model variants")
     msub = p.add_subparsers(dest="models_command", required=True)
     m = msub.add_parser("list")
@@ -250,6 +261,12 @@ def run_local(args) -> tuple[list, dict]:
         r = engine.isolate(
             image, mask, args.description, args.method, args.crop, args.keep_canvas, args.clip, args.restore_pixels, opts, hooks
         )
+    elif args.command == "background":
+        image = _open(args.image)
+        r = engine.background(
+            image, _open(args.background), _local_mask(args, image.size), args.prompt, args.method, args.keep_subject,
+            opts=opts, hooks=hooks,
+        )
     else:
         raise AssertionError(args.command)
     return r.images, {"seed": r.seed, "prompt": r.prompt, "variant": r.variant, "info": r.info}
@@ -289,13 +306,16 @@ def run_remote(args) -> tuple[list, dict]:
         attach("image", args.image)
         attach("pose", args.pose)
         data |= {"prompt": args.prompt, "pose_type": args.pose_type, "keep_background": str(args.keep_background).lower()}
-    elif args.command in ("edit", "isolate", "face"):
+    elif args.command in ("edit", "isolate", "face", "background"):
         attach("image", args.image)
         if args.mask:
             attach("mask", args.mask)
         if args.polygon or args.box:
             data["selection"] = json.dumps({"polygons": args.polygon, "boxes": args.box})
-        if args.command == "face":
+        if args.command == "background":
+            attach("background", args.background)
+            data |= {"prompt": args.prompt, "method": args.method, "keep_subject": str(args.keep_subject).lower()}
+        elif args.command == "face":
             attach("face", args.face)
             data |= {
                 "prompt": args.prompt, "keep_hair": str(args.keep_hair).lower(),

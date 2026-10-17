@@ -58,9 +58,14 @@ const MODES = {
     promptLabel: "What did you select? (optional, improves accuracy)", placeholder: "the red-haired girl / the sword she holds / the lamp on the table",
     run: "Isolate subject",
   },
+  background: {
+    help: "Swap the background of the image on the right for the one in another image, keeping the subject.",
+    promptLabel: "Extra instructions, or what the subject is (optional)", placeholder: "the woman in the red coat / late afternoon light…",
+    run: "Replace background",
+  },
 };
 
-const EDITOR_MODES = ["edit", "isolate", "face"];
+const EDITOR_MODES = ["edit", "isolate", "face", "background"];
 
 const ASPECTS = { "1:1": 1, "4:3": 4 / 3, "3:4": 3 / 4, "3:2": 3 / 2, "2:3": 2 / 3, "16:9": 16 / 9, "9:16": 9 / 16 };
 
@@ -125,7 +130,7 @@ class Workspace {
   // --- persistence (settings only; images live in memory)
   settingRoles() {
     return ["prompt", "variant", "aspect", "resolution", "steps", "seed", "cfg", "num-images", "negative",
-      "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "pose-type", "keep-background", "keep-hair", "keep-expression"];
+      "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "pose-type", "keep-background", "keep-hair", "keep-expression", "bg-method", "keep-subject"];
   }
   snapshot() {
     const s = { name: this.name, mode: this.mode, settings: {} };
@@ -232,6 +237,7 @@ class Workspace {
     this.r("editor-hint").textContent = {
       isolate: "Draw around the subject with the lasso (or paint over it). A loose outline is fine — for small items, outline just that item.",
       face: "Open the image whose face should change. Optional: outline the face (and hair, if transferring it) when there are several people.",
+      background: "Open the image whose subject you want to keep. Optional: outline the subject when the image has several.",
     }[mode] || "Optional: select the area to change. Leave empty to edit the whole image.";
     this.updateVisibility();
     this.renderThumbs();
@@ -461,6 +467,12 @@ class Workspace {
         f.append("transparent", this.r("transparent").checked);
         f.append("mask_mode", this.r("mask-mode").value);
         f.append("keep_outside", this.r("keep-outside").checked);
+      } else if (this.mode === "background") {
+        if (!this.slots.background) throw new Error("Add an image with the background you want.");
+        f.append("background", this.slots.background.blob, this.slots.background.name);
+        f.append("prompt", prompt);
+        f.append("method", this.r("bg-method").value);
+        f.append("keep_subject", this.r("keep-subject").checked);
       } else if (this.mode === "face") {
         if (!this.slots.face) throw new Error("Add an image showing the face to use.");
         f.append("face", this.slots.face.blob, this.slots.face.name);

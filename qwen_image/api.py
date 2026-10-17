@@ -318,6 +318,35 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         )
         return await respond(job, wait)
 
+    @app.post("/api/background", status_code=202, summary="Replace an image's background with the one from another image")
+    async def background(
+        image: UploadFile = File(..., description="Image whose subject should be kept"),
+        background: UploadFile = File(..., description="Image whose background should be used"),
+        mask: UploadFile | None = File(None, description="Optional selection around the subject to keep"),
+        selection: str | None = Form(None, description='JSON: {"polygons": [[[x,y],...]], "boxes": [[x0,y0,x1,y1]]}'),
+        prompt: str = Form("", description="model: extra instructions; composite: what the subject is"),
+        method: str = Form("model", description="'model' (repaint the scene behind the subject) or 'composite' (cut out and paste over)"),
+        keep_subject: bool = Form(False, description="model + selection: paste original pixels inside the selection back"),
+        width: int | None = f["width"], height: int | None = f["height"], steps: int | None = f["steps"],
+        seed: int | None = f["seed"], cfg: float = f["cfg"], negative_prompt: str | None = f["negative_prompt"],
+        num_images: int = f["num_images"], resolution: int = f["resolution"],
+        variant: str | None = f["variant"], wait: bool = f["wait"],
+        preview: str = f["preview"], preview_every: int | None = f["preview_every"],
+    ):
+        if method not in ("model", "composite"):
+            raise HTTPException(400, "method must be 'model' or 'composite'")
+        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, False, preview, preview_every)
+        img = _read_image(image, "image")
+        bg = _read_image(background, "background")
+        m = _selection_mask(img.size, mask, selection)
+        v = _check_variant(variant)
+        params = {"prompt": prompt, "method": method, "keep_subject": keep_subject, "masked": not sel.is_empty(m)} | opts.__dict__
+        job = jobs.submit(
+            "background", params,
+            lambda hooks: engine.background(img, bg, m, prompt, method, keep_subject, opts=opts, hooks=hooks, variant=v),
+        )
+        return await respond(job, wait)
+
     # ------------------------------------------------------------------ jobs
 
     @app.get("/api/jobs")
