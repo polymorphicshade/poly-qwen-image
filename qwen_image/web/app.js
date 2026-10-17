@@ -43,6 +43,11 @@ const MODES = {
     promptLabel: "Extra instructions (optional)", placeholder: "keep the sword in the right hand…",
     run: "Apply pose",
   },
+  face: {
+    help: "Give the person in the image on the right the face from the reference, to keep a character consistent across images. Outline the face if there are several people.",
+    promptLabel: "Extra instructions (optional)", placeholder: "keep the scar over the left eye…",
+    run: "Apply face",
+  },
   combine: {
     help: "Put subjects from several images into one new scene. Refer to them in order (first image, second image…).",
     promptLabel: "Prompt", placeholder: "The character from the first image holding the lamp from the second image, in a forest at night…",
@@ -54,6 +59,8 @@ const MODES = {
     run: "Isolate subject",
   },
 };
+
+const EDITOR_MODES = ["edit", "isolate", "face"];
 
 const ASPECTS = { "1:1": 1, "4:3": 4 / 3, "3:4": 3 / 4, "3:2": 3 / 2, "2:3": 2 / 3, "16:9": 16 / 9, "9:16": 9 / 16 };
 
@@ -118,7 +125,7 @@ class Workspace {
   // --- persistence (settings only; images live in memory)
   settingRoles() {
     return ["prompt", "variant", "aspect", "resolution", "steps", "seed", "cfg", "num-images", "negative",
-      "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "pose-type", "keep-background"];
+      "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "pose-type", "keep-background", "keep-hair", "keep-expression"];
   }
   snapshot() {
     const s = { name: this.name, mode: this.mode, settings: {} };
@@ -211,6 +218,8 @@ class Workspace {
     return $$("[data-slot]", this.el).filter(s => !s.closest("[data-show]")?.hidden).map(s => s.dataset.slot);
   }
 
+  usesEditor() { return EDITOR_MODES.includes(this.mode); }
+
   setMode(mode) {
     this.mode = mode;
     const m = MODES[mode];
@@ -220,12 +229,13 @@ class Workspace {
     this.r("prompt").placeholder = m.placeholder;
     if (m.imagesLabel) this.r("images-label").textContent = m.imagesLabel;
     this.r("run").textContent = m.run;
-    this.r("editor-hint").textContent = mode === "isolate"
-      ? "Draw around the subject with the lasso (or paint over it). A loose outline is fine — for small items, outline just that item."
-      : "Optional: select the area to change. Leave empty to edit the whole image.";
+    this.r("editor-hint").textContent = {
+      isolate: "Draw around the subject with the lasso (or paint over it). A loose outline is fine — for small items, outline just that item.",
+      face: "Open the image whose face should change. Optional: outline the face (and hair, if transferring it) when there are several people.",
+    }[mode] || "Optional: select the area to change. Leave empty to edit the whole image.";
     this.updateVisibility();
     this.renderThumbs();
-    if (mode === "edit" || mode === "isolate") requestAnimationFrame(() => this.render());
+    if (this.usesEditor()) requestAnimationFrame(() => this.render());
   }
 
   updateVisibility() {
@@ -451,6 +461,13 @@ class Workspace {
         f.append("transparent", this.r("transparent").checked);
         f.append("mask_mode", this.r("mask-mode").value);
         f.append("keep_outside", this.r("keep-outside").checked);
+      } else if (this.mode === "face") {
+        if (!this.slots.face) throw new Error("Add an image showing the face to use.");
+        f.append("face", this.slots.face.blob, this.slots.face.name);
+        f.append("prompt", prompt);
+        f.append("keep_hair", this.r("keep-hair").checked);
+        f.append("keep_expression", this.r("keep-expression").checked);
+        f.append("keep_outside", this.r("keep-outside").checked);
       } else {
         if (!selected) throw new Error("Outline the subject to isolate first.");
         f.append("description", prompt);
@@ -599,7 +616,7 @@ class Workspace {
       card.querySelector('[data-a="edit"]').onclick = () => { this.setMode("edit"); this.setSingle(item.blob); };
       card.querySelector('[data-a="isolate"]').onclick = () => { this.setMode("isolate"); this.setSingle(item.blob); };
       card.querySelector('[data-a="ref"]').onclick = () => {
-        if (this.mode === "edit" || this.mode === "isolate") this.setSingle(item.blob);
+        if (this.usesEditor()) this.setSingle(item.blob);
         else if (this.mode === "pose") this.setSlot("subject", item.blob);
         else this.addMulti([new File([item.blob], item.name, { type: "image/png" })]);
       };
@@ -808,7 +825,7 @@ document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); ws.undo(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
   const tools = { l: "lasso", r: "box", b: "brush", e: "erase" };
-  if (tools[e.key.toLowerCase()] && (ws.mode === "edit" || ws.mode === "isolate")) ws.setTool(tools[e.key.toLowerCase()]);
+  if (tools[e.key.toLowerCase()] && ws.usesEditor()) ws.setTool(tools[e.key.toLowerCase()]);
 });
 
 document.addEventListener("paste", e => {
@@ -817,9 +834,12 @@ document.addEventListener("paste", e => {
   const files = [...(e.clipboardData?.files || [])].filter(f => f.type.startsWith("image/"));
   if (!files.length) return;
   e.preventDefault();
+  // Fill an empty slot first, then the editor, then the image list.
   const slots = ws.modeSlots();
-  if (slots.length) ws.setSlot(slots.find(n => !ws.slots[n]) || slots[slots.length - 1], files[0]);
-  else if (ws.mode === "edit" || ws.mode === "isolate") ws.setSingle(files[0]);
+  const empty = slots.find(n => !ws.slots[n]);
+  if (empty) ws.setSlot(empty, files[0]);
+  else if (ws.usesEditor()) ws.setSingle(files[0]);
+  else if (slots.length) ws.setSlot(slots[slots.length - 1], files[0]);
   else ws.addMulti(files);
 });
 

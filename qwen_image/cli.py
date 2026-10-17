@@ -3,6 +3,7 @@
     qwen-image generate -p "a red fox in snow" -o fox.png
     qwen-image edit -i fox.png -p "make it night" --box 100,100,400,400
     qwen-image pose -i hero.png --pose stick_figure.png --pose-type skeleton
+    qwen-image face -i scene.png --face hero_portrait.png [--box 300,80,420,220]
     qwen-image combine -i cat.png -i hat.png -p "the cat wearing the hat"
     qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight"
     qwen-image models list | download VARIANT
@@ -99,6 +100,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prompt", "-p", default="", help="optional extra instructions")
     p.add_argument("--pose-type", choices=["auto", "character", "skeleton", "sketch"], default="auto")
     p.add_argument("--no-keep-background", dest="keep_background", action="store_false", help="allow the background to change")
+    _add_common(p)
+
+    p = sub.add_parser("face", help="give an image's subject the face from a reference image")
+    p.add_argument("--image", "-i", required=True, help="image whose subject's face should change")
+    p.add_argument("--face", required=True, help="reference image showing the face to use")
+    p.add_argument("--prompt", "-p", default="", help="optional extra instructions")
+    _add_selection(p)
+    p.add_argument("--transfer-hair", dest="keep_hair", action="store_false", help="take the hairstyle from the reference too")
+    p.add_argument("--transfer-expression", dest="keep_expression", action="store_false", help="take the expression from the reference too")
+    p.add_argument("--no-keep-outside", dest="keep_outside", action="store_false", help="let the model change pixels outside the selection")
+    p.add_argument("--feather", type=float, default=6.0)
     _add_common(p)
 
     p = sub.add_parser("combine", help="combine subjects from 2-10 images into a new image")
@@ -222,6 +234,12 @@ def run_local(args) -> tuple[list, dict]:
         r = engine.edit(image, args.prompt, _local_mask(args, image.size), args.mask_mode, args.keep_outside, args.feather, opts, hooks)
     elif args.command == "pose":
         r = engine.pose(_open(args.image), _open(args.pose), args.prompt, args.pose_type, args.keep_background, opts, hooks)
+    elif args.command == "face":
+        image = _open(args.image)
+        r = engine.face(
+            image, _open(args.face), _local_mask(args, image.size), args.prompt, args.keep_hair,
+            args.keep_expression, args.keep_outside, args.feather, opts, hooks,
+        )
     elif args.command == "combine":
         r = engine.combine([_open(p) for p in args.image], args.prompt, opts, hooks)
     elif args.command == "isolate":
@@ -271,13 +289,20 @@ def run_remote(args) -> tuple[list, dict]:
         attach("image", args.image)
         attach("pose", args.pose)
         data |= {"prompt": args.prompt, "pose_type": args.pose_type, "keep_background": str(args.keep_background).lower()}
-    elif args.command in ("edit", "isolate"):
+    elif args.command in ("edit", "isolate", "face"):
         attach("image", args.image)
         if args.mask:
             attach("mask", args.mask)
         if args.polygon or args.box:
             data["selection"] = json.dumps({"polygons": args.polygon, "boxes": args.box})
-        if args.command == "edit":
+        if args.command == "face":
+            attach("face", args.face)
+            data |= {
+                "prompt": args.prompt, "keep_hair": str(args.keep_hair).lower(),
+                "keep_expression": str(args.keep_expression).lower(),
+                "keep_outside": str(args.keep_outside).lower(), "feather": str(args.feather),
+            }
+        elif args.command == "edit":
             data |= {"prompt": args.prompt, "mask_mode": args.mask_mode, "keep_outside": str(args.keep_outside).lower(), "feather": str(args.feather)}
         else:
             data |= {

@@ -319,6 +319,63 @@ class Engine:
             out.append(img if opts.transparent else _rgb_if_opaque(img))
         return self._result(out, seed, full, pose_type=pose_type)
 
+    def face(
+        self,
+        image: Image.Image,
+        face_ref: Image.Image,
+        mask: Image.Image | None = None,
+        prompt: str = "",
+        keep_hair: bool = True,
+        keep_expression: bool = True,
+        keep_outside: bool = True,
+        feather_px: float = 6.0,
+        opts: Options | None = None,
+        hooks: Hooks | None = None,
+        variant: str | None = None,
+    ) -> Result:
+        """Give the subject of ``image`` the face of the person/character in ``face_ref``.
+
+        Meant for keeping a character consistent across images. ``face_ref`` and the target go
+        to the model as two condition images (target last, so the output keeps its framing).
+        An optional ``mask`` circles the face to change - useful with several people - and with
+        ``keep_outside`` everything outside it keeps the original pixels.
+        """
+        opts, hooks = opts or Options(), hooks or Hooks()
+        has_mask = not sel.is_empty(mask)
+        identity = "facial structure, eyes, eyebrows, nose, mouth, jawline, skin tone and distinguishing marks"
+        keep = ["head angle", "lighting", "body", "clothing", "background", "art style"]
+        if keep_hair:
+            keep.insert(1, "hairstyle and hair colour")
+        else:
+            identity += ", hairstyle and hair colour"
+        if keep_expression:
+            keep.insert(0, "facial expression")
+        else:
+            identity += ", and facial expression"
+        target = "the person outlined in red in the second image" if has_mask else "the person in the second image"
+        parts = [
+            f"Replace the face of {target} with the face of the person in the first image, so that they are clearly "
+            f"the same person: same {identity}.",
+            f"Keep the second image's {', '.join(keep[:-1])} and {keep[-1]} unchanged.",
+        ]
+        if has_mask:
+            parts.append("Only change the outlined face and remove the red outline.")
+        if prompt.strip():
+            parts.append(prompt.strip().rstrip(".") + ".")
+        full = " ".join(parts)
+        if opts.transparent:
+            full = transparent_prompt(full)
+        target_img = sel.annotate(image, mask) if has_mask else image
+        imgs, seed = self._run(full, [face_ref, target_img], opts, hooks, variant)
+        out = []
+        for img in imgs:
+            if has_mask and keep_outside:
+                img = sel.composite_inside(image, img, mask, feather_px)
+            elif opts.width is None and opts.height is None:
+                img = img.resize(image.size, Image.Resampling.LANCZOS)
+            out.append(img if opts.transparent else _rgb_if_opaque(img))
+        return self._result(out, seed, full, masked=has_mask, keep_hair=keep_hair, keep_expression=keep_expression)
+
     def combine(
         self,
         images: list[Image.Image],

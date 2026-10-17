@@ -236,6 +236,38 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         )
         return await respond(job, wait)
 
+    @app.post("/api/face", status_code=202, summary="Give an image's subject the face from a reference image")
+    async def face(
+        image: UploadFile = File(..., description="Image whose subject's face should change"),
+        face: UploadFile = File(..., description="Reference image showing the face to use"),
+        mask: UploadFile | None = File(None, description="Optional selection around the face to change"),
+        selection: str | None = Form(None, description='JSON: {"polygons": [[[x,y],...]], "boxes": [[x0,y0,x1,y1]]}'),
+        prompt: str = Form("", description="Optional extra instructions"),
+        keep_hair: bool = Form(True, description="Keep the target's hairstyle (false: take hair from the reference too)"),
+        keep_expression: bool = Form(True, description="Keep the target's facial expression"),
+        keep_outside: bool = Form(True, description="With a selection, restore original pixels outside it"),
+        feather: float = Form(6.0, description="Feather radius for keep_outside blending"),
+        width: int | None = f["width"], height: int | None = f["height"], steps: int | None = f["steps"],
+        seed: int | None = f["seed"], cfg: float = f["cfg"], negative_prompt: str | None = f["negative_prompt"],
+        num_images: int = f["num_images"], resolution: int = f["resolution"], transparent: bool = f["transparent"],
+        variant: str | None = f["variant"], wait: bool = f["wait"],
+        preview: str = f["preview"], preview_every: int | None = f["preview_every"],
+    ):
+        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview, preview_every)
+        img = _read_image(image, "image")
+        ref = _read_image(face, "face")
+        m = _selection_mask(img.size, mask, selection)
+        v = _check_variant(variant)
+        params = {
+            "prompt": prompt, "keep_hair": keep_hair, "keep_expression": keep_expression,
+            "masked": not sel.is_empty(m), "keep_outside": keep_outside,
+        } | opts.__dict__
+        job = jobs.submit(
+            "face", params,
+            lambda hooks: engine.face(img, ref, m, prompt, keep_hair, keep_expression, keep_outside, feather, opts, hooks, v),
+        )
+        return await respond(job, wait)
+
     @app.post("/api/combine", status_code=202, summary="Combine subjects from 2-10 images into a new image")
     async def combine(
         images: list[UploadFile] = File(..., description="2 to 10 subject images, in the order the prompt refers to them"),
