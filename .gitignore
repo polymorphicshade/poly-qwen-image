@@ -5,3 +5,7 @@ build/
 dist/
 .pytest_cache/
 outputs/
+.env
+deploy/conf.d/*.caddy
+deploy/certs/*
+!deploy/certs/.gitkeep
