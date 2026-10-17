@@ -16,6 +16,7 @@ from dataclasses import dataclass, field, fields
 from PIL import Image, ImageChops
 
 from . import selection as sel
+from .preview import Previewer, output_dims
 from .variants import Variant, get_variant
 
 log = logging.getLogger(__name__)
@@ -40,6 +41,9 @@ class Options:
     num_images: int = 1
     resolution: int = 1024
     transparent: bool = False
+    # Live previews while sampling: "off", "fast" (approximate, every step) or "full" (VAE decode).
+    preview: str = "off"
+    preview_every: int | None = None
 
     @classmethod
     def from_dict(cls, d: dict) -> Options:
@@ -52,6 +56,8 @@ class Hooks:
     progress: Callable[[int, int], None] = lambda step, total: None
     status: Callable[[str], None] = lambda msg: None
     cancelled: Callable[[], bool] = lambda: False
+    # Receives (preview image, step) when Options.preview is enabled.
+    preview: Callable[[Image.Image, int], None] = lambda image, step: None
 
 
 @dataclass
@@ -143,8 +149,18 @@ class Engine:
         steps = None if v.turbo else opts.steps
         total = 8 if v.turbo else (steps or 40)
 
+        # Resolve the output size up front (as the pipeline would) so previews know the latent grid.
+        width, height = output_dims(opts.width, opts.height, images, opts.resolution)
+        previewer = None
+        if opts.preview and opts.preview != "off":
+            if opts.preview == "fast":
+                hooks.status("Preparing previews")
+            previewer = Previewer(pipe, opts.preview, opts.preview_every, width, height, total, hooks.preview, mock=v.name == "mock")
+
         def on_step(p, i, t, kwargs):
             hooks.progress(i + 1, total)
+            if previewer is not None:
+                previewer(i, kwargs.get("latents"))
             if hooks.cancelled():
                 p._interrupt = True
             return kwargs
@@ -152,8 +168,8 @@ class Engine:
         kwargs = dict(
             prompt=prompt,
             image=images or None,
-            width=opts.width,
-            height=opts.height,
+            width=width,
+            height=height,
             generator=generator,
             num_images_per_prompt=max(1, opts.num_images),
             output_resolution=opts.resolution,

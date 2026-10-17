@@ -113,7 +113,7 @@ class Workspace {
   // --- persistence (settings only; images live in memory)
   settingRoles() {
     return ["prompt", "variant", "aspect", "resolution", "steps", "seed", "cfg", "num-images", "negative",
-      "transparent", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas"];
+      "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas"];
   }
   snapshot() {
     const s = { name: this.name, mode: this.mode, settings: {} };
@@ -382,6 +382,7 @@ class Workspace {
     add("seed", this.r("seed").value);
     add("cfg", this.r("cfg").value);
     add("num_images", this.r("num-images").value);
+    add("preview", this.r("preview").value);
     if (parseFloat(this.r("cfg").value) > 1) add("negative_prompt", this.r("negative").value);
     this.sizeFields(f);
 
@@ -438,6 +439,7 @@ class Workspace {
     const bar = $(".bar", this.r("progress"));
     bar.style.width = "0";
     const mode = this.mode;
+    const live = this.r("preview").value !== "off" && !(mode === "isolate" && this.r("method").value === "mask");
     try {
       const created = await api.post(`/api/${mode}`, form);
       this.job = created;
@@ -446,6 +448,7 @@ class Workspace {
         const { step, total } = j.progress;
         this.r("progress").classList.toggle("indeterminate", !total);
         if (total) bar.style.width = `${(100 * step) / total}%`;
+        if (live) this.showLive(j);
         if (j.status === "queued") this.setStatus(`Queued (position ${j.queue_position})…`);
         else if (j.status === "running") this.setStatus(total ? `${j.message || "Sampling"} — step ${step}/${total}` : (j.message || "Working…"));
       });
@@ -462,6 +465,7 @@ class Workspace {
     } catch (e) {
       this.setStatus(e.message, true);
     } finally {
+      this.hideLive();
       this.job = null;
       this.setBusy(false);
       refreshHealth();
@@ -473,6 +477,37 @@ class Workspace {
       try { await api.del(`/api/jobs/${this.job.id}`); } catch { /* already finished */ }
       this.setStatus("Cancelling…");
     }
+  }
+
+  // --- live preview
+  showLive(job) {
+    if (!this.live) {
+      const card = document.createElement("div");
+      card.className = "result live";
+      card.innerHTML = `<div class="img"><img alt="Live preview" hidden><span class="live-wait">Waiting for the first step…</span></div><div class="meta"></div>`;
+      card.querySelector("img").onclick = e => lightbox(e.target.src);
+      this.live = { card, url: null };
+      this.renderResults();
+    }
+    const { card } = this.live;
+    if (job.preview && job.preview !== this.live.url) {
+      this.live.url = job.preview;
+      const img = card.querySelector("img");
+      img.src = job.preview;
+      img.hidden = false;
+      card.querySelector(".live-wait").hidden = true;
+    }
+    const total = job.progress.total;
+    card.querySelector(".meta").textContent = job.status === "queued"
+      ? "Queued…"
+      : job.preview_step ? `Live preview · step ${job.preview_step}/${total}` : (job.message || "Starting…");
+  }
+
+  hideLive() {
+    if (!this.live) return;
+    this.live.card.remove();
+    this.live = null;
+    if (!this.results.length) this.renderResults();
   }
 
   // --- results
@@ -488,7 +523,11 @@ class Workspace {
   renderResults() {
     const box = this.r("results");
     box.innerHTML = "";
-    if (!this.results.length) { box.innerHTML = `<p class="empty">Results appear here.</p>`; return; }
+    if (this.live) box.appendChild(this.live.card);
+    if (!this.results.length) {
+      if (!this.live) box.innerHTML = `<p class="empty">Results appear here.</p>`;
+      return;
+    }
     for (const item of this.results) {
       const card = document.createElement("div");
       card.className = "result";

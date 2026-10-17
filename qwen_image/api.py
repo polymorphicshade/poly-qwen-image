@@ -13,7 +13,7 @@ import logging
 from pathlib import Path
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
 
@@ -21,6 +21,7 @@ from . import __version__
 from . import selection as sel
 from .engine import Engine, Options
 from .jobs import TERMINAL, Job, JobManager
+from .preview import MODES as PREVIEW_MODES
 from .variants import DEFAULT_VARIANT, get_variant, list_variants
 
 log = logging.getLogger(__name__)
@@ -51,8 +52,10 @@ def _selection_mask(size, mask: UploadFile | None, selection: str | None) -> Ima
 
 
 def _options(
-    width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent
+    width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview="off", preview_every=None
 ) -> Options:
+    if preview not in PREVIEW_MODES:
+        raise HTTPException(400, f"preview must be one of {', '.join(PREVIEW_MODES)}")
     if num_images is not None and not 1 <= num_images <= 8:
         raise HTTPException(400, "num_images must be between 1 and 8")
     for name, v in (("width", width), ("height", height)):
@@ -69,6 +72,8 @@ def _options(
             num_images=num_images,
             resolution=resolution,
             transparent=transparent,
+            preview=preview,
+            preview_every=preview_every,
         )
     )
 
@@ -109,6 +114,8 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
             transparent=Form(False, description="Generate a transparent (RGBA) image"),
             variant=Form(None, description="Model variant to use (default: currently loaded / server default)"),
             wait=Form(False, description="Block until the job finishes"),
+            preview=Form("fast", description="Live previews: 'off', 'fast' (approximate) or 'full' (exact VAE decode, slower)"),
+            preview_every=Form(None, description="Make a preview every N steps (default 1 for fast, 5 for full)"),
         )
 
     # ------------------------------------------------------------------ meta
@@ -166,8 +173,9 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         seed: int | None = f["seed"], cfg: float = f["cfg"], negative_prompt: str | None = f["negative_prompt"],
         num_images: int = f["num_images"], resolution: int = f["resolution"], transparent: bool = f["transparent"],
         variant: str | None = f["variant"], wait: bool = f["wait"],
+        preview: str = f["preview"], preview_every: int | None = f["preview_every"],
     ):
-        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent)
+        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview, preview_every)
         refs = [_read_image(r, "references") for r in references if r.filename]
         v = _check_variant(variant)
         params = {"prompt": prompt, "references": len(refs)} | opts.__dict__
@@ -187,10 +195,11 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         seed: int | None = f["seed"], cfg: float = f["cfg"], negative_prompt: str | None = f["negative_prompt"],
         num_images: int = f["num_images"], resolution: int = f["resolution"], transparent: bool = f["transparent"],
         variant: str | None = f["variant"], wait: bool = f["wait"],
+        preview: str = f["preview"], preview_every: int | None = f["preview_every"],
     ):
         if mask_mode not in ("annotate", "reference"):
             raise HTTPException(400, "mask_mode must be 'annotate' or 'reference'")
-        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent)
+        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview, preview_every)
         img = _read_image(image, "image")
         m = _selection_mask(img.size, mask, selection)
         v = _check_variant(variant)
@@ -209,8 +218,9 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         seed: int | None = f["seed"], cfg: float = f["cfg"], negative_prompt: str | None = f["negative_prompt"],
         num_images: int = f["num_images"], resolution: int = f["resolution"], transparent: bool = f["transparent"],
         variant: str | None = f["variant"], wait: bool = f["wait"],
+        preview: str = f["preview"], preview_every: int | None = f["preview_every"],
     ):
-        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent)
+        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview, preview_every)
         imgs = [_read_image(i, "images") for i in images if i.filename]
         if not 2 <= len(imgs) <= 10:
             raise HTTPException(400, "combine needs between 2 and 10 images")
@@ -233,10 +243,11 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         steps: int | None = f["steps"], seed: int | None = f["seed"], cfg: float = f["cfg"],
         negative_prompt: str | None = f["negative_prompt"], num_images: int = f["num_images"],
         resolution: int = f["resolution"], variant: str | None = f["variant"], wait: bool = f["wait"],
+        preview: str = f["preview"], preview_every: int | None = f["preview_every"],
     ):
         if method not in ("model", "mask"):
             raise HTTPException(400, "method must be 'model' or 'mask'")
-        opts = _options(None, None, steps, seed, cfg, negative_prompt, num_images, resolution, True)
+        opts = _options(None, None, steps, seed, cfg, negative_prompt, num_images, resolution, True, preview, preview_every)
         img = _read_image(image, "image")
         m = _selection_mask(img.size, mask, selection)
         if sel.is_empty(m):
@@ -269,6 +280,17 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
     def cancel_job(job_id: str):
         _job(job_id)
         return jobs.cancel(job_id).to_dict()
+
+    @app.get("/api/jobs/{job_id}/preview", summary="Latest live preview of a running job (PNG)")
+    def job_preview(job_id: str):
+        job = _job(job_id)
+        if not job.preview_png:
+            raise HTTPException(404, "No preview yet")
+        return Response(
+            job.preview_png,
+            media_type="image/png",
+            headers={"Cache-Control": "no-store", "X-Preview-Step": str(job.preview_step)},
+        )
 
     @app.get("/api/jobs/{job_id}/images/{index}")
     def job_image(job_id: str, index: int, download: bool = False):

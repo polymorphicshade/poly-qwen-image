@@ -57,6 +57,10 @@ def _add_common(p: argparse.ArgumentParser, size: bool = True):
     if size:
         g.add_argument("--transparent", "-t", action="store_true", help="generate a transparent RGBA image")
     g.add_argument("--offload", choices=["auto", "none", "model", "sequential"], default="auto", help="CPU offload strategy")
+    g = p.add_argument_group("live previews")
+    g.add_argument("--preview", choices=["off", "fast", "full"], help="preview mode (default: fast when --preview-dir is set, else off)")
+    g.add_argument("--preview-every", type=int, help="make a preview every N steps (default 1 for fast, 5 for full)")
+    g.add_argument("--preview-dir", help="save each step's preview here as step_NN.png")
     p.add_argument("--output", "-o", default=None, help="output file; with several images, _1, _2 ... are appended")
     p.add_argument("--api", help="run on a server, e.g. http://127.0.0.1:7860")
     p.add_argument("--json", action="store_true", help="print a JSON summary to stdout")
@@ -149,7 +153,19 @@ def _options(args):
     return Options.from_dict(vars(args))
 
 
-def _progress_hooks():
+def _resolve_preview(args) -> None:
+    if getattr(args, "preview", None) is None:
+        args.preview = "fast" if getattr(args, "preview_dir", None) else "off"
+
+
+def _save_preview(args, image, step) -> None:
+    if args.preview_dir:
+        folder = Path(args.preview_dir)
+        folder.mkdir(parents=True, exist_ok=True)
+        image.save(folder / f"step_{step:02d}.png")
+
+
+def _progress_hooks(args=None):
     from .engine import Hooks
 
     state = {"mid_bar": False}
@@ -169,7 +185,10 @@ def _progress_hooks():
             state["mid_bar"] = False
         print(msg, file=sys.stderr)
 
-    return Hooks(progress=progress, status=status)
+    hooks = Hooks(progress=progress, status=status)
+    if args is not None and getattr(args, "preview_dir", None):
+        hooks.preview = lambda image, step: _save_preview(args, image, step)
+    return hooks
 
 
 def _local_mask(args, size):
@@ -186,7 +205,7 @@ def run_local(args) -> tuple[list, dict]:
     from .engine import Engine
 
     engine = Engine(args.variant, offload=args.offload)
-    opts, hooks = _options(args), _progress_hooks()
+    opts, hooks = _options(args), _progress_hooks(args)
     if args.command == "generate":
         r = engine.generate(args.prompt, [_open(p) for p in args.reference], opts, hooks)
     elif args.command == "edit":
@@ -218,7 +237,9 @@ def run_remote(args) -> tuple[list, dict]:
 
     base = args.api.rstrip("/")
     data: dict = {"wait": "false"}
-    for key in ("variant", "width", "height", "resolution", "steps", "seed", "cfg", "negative_prompt", "num_images", "transparent"):
+    keys = ("variant", "width", "height", "resolution", "steps", "seed", "cfg", "negative_prompt", "num_images", "transparent",
+            "preview", "preview_every")
+    for key in keys:
         val = getattr(args, key, None)
         if val is not None and val is not False:
             data[key] = str(val).lower() if isinstance(val, bool) else str(val)
@@ -250,13 +271,14 @@ def run_remote(args) -> tuple[list, dict]:
                 "restore_pixels": str(args.restore_pixels).lower(),
             }
 
-    hooks = _progress_hooks()
+    hooks = _progress_hooks(args)
     with httpx.Client(timeout=httpx.Timeout(60.0, read=None)) as client:
         resp = client.post(f"{base}/api/{args.command}", data=data, files=files or None)
         if resp.status_code >= 400:
             raise SystemExit(f"Server error {resp.status_code}: {resp.text}")
         job = resp.json()
         last_msg = None
+        last_preview = 0
         while job["status"] not in ("done", "error", "cancelled"):
             time.sleep(0.5)
             job = client.get(f"{base}/api/jobs/{job['id']}").json()
@@ -265,6 +287,9 @@ def run_remote(args) -> tuple[list, dict]:
                 last_msg = job["message"]
             if job["progress"]["total"]:
                 hooks.progress(job["progress"]["step"], job["progress"]["total"])
+            if args.preview_dir and job.get("preview") and job["preview_step"] != last_preview:
+                last_preview = job["preview_step"]
+                hooks.preview(Image.open(io.BytesIO(client.get(base + job["preview"]).content)), last_preview)
         if job["status"] != "done":
             raise SystemExit(f"Job {job['status']}: {job.get('error') or ''}")
         images = [Image.open(io.BytesIO(client.get(base + url).content)) for url in job["images"]]
@@ -318,6 +343,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "combine" and not 2 <= len(args.image) <= 10:
         raise SystemExit("combine needs between 2 and 10 --image arguments")
 
+    _resolve_preview(args)
     images, meta = run_remote(args) if args.api else run_local(args)
     paths = _output_paths(args, len(images))
     for img, path in zip(images, paths):

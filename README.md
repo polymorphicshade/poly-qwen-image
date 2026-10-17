@@ -56,8 +56,9 @@ Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all th
 | POST | `/api/models/load` · `/api/models/download` · `/api/models/unload` | model management |
 | GET / DELETE | `/api/jobs/{id}` | poll or cancel a job |
 | GET | `/api/jobs/{id}/images/{n}` | result PNG |
+| GET | `/api/jobs/{id}/preview` | latest live preview PNG while the job runs |
 
-All operation endpoints take multipart form fields. They also accept the shared options `variant`, `width`, `height`, `resolution`, `steps`, `seed`, `cfg`, `negative_prompt`, `num_images`, `transparent` and `wait`. Each call returns a job (`202`), which you poll; send `wait=true` to block until the job finishes instead. Jobs share a single GPU worker queue.
+All operation endpoints take multipart form fields. They also accept the shared options `variant`, `width`, `height`, `resolution`, `steps`, `seed`, `cfg`, `negative_prompt`, `num_images`, `transparent`, `preview`, `preview_every` and `wait`. Each call returns a job (`202`), which you poll; send `wait=true` to block until the job finishes instead. Jobs share a single GPU worker queue.
 
 A `selection` value is either `{"polygons": [[[x, y], ...], ...], "boxes": [[x0, y0, x1, y1], ...]}` or a bare list of polygons. A `mask` image counts white or opaque pixels as selected.
 
@@ -77,6 +78,18 @@ qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "th
 ```
 
 By default each command loads the model in-process. Add `--api http://127.0.0.1:7860` to run the command on a server that already has the model loaded. Use `--json` for machine-readable output, and `qwen-image <command> -h` to list every option.
+
+## Live previews
+
+Each operation can stream previews while it samples. The web UI shows them in a live card in the results grid. The API exposes them as `preview` and `preview_step` on the job, served from `GET /api/jobs/{id}/preview`.
+
+- `preview=fast` (the API and UI default) projects the latents to colours with a linear map. The map is calibrated once per loaded model by VAE-encoding a test image, so each preview costs almost nothing. Previews come every step, at low resolution with approximate colours.
+- `preview=full` runs the real VAE decode every `preview_every` steps (5 by default). The output is exact but slower: with CPU offload, the denoiser is swapped out of VRAM for every preview.
+- `preview=off` turns previews off.
+
+Both modes show the model's current estimate of the *finished* image, recovered from consecutive steps (`x0 = x - sigma * v`), rather than the noisy latents. That makes the composition readable after only a few steps.
+
+From the CLI, add `--preview-dir steps/` to save every preview as `step_NN.png`. This works locally and with `--api`.
 
 ## How selections reach the model
 

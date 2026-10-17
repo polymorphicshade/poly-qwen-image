@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
 import queue
@@ -40,6 +41,9 @@ class Job:
     variant: str | None = None
     info: dict = field(default_factory=dict)
     cancel_requested: bool = False
+    # Latest live preview as PNG bytes, and the sampling step it shows.
+    preview_png: bytes | None = field(default=None, repr=False)
+    preview_step: int = 0
     done_event: threading.Event = field(default_factory=threading.Event, repr=False)
 
     def to_dict(self, base_url: str = "/api") -> dict:
@@ -59,6 +63,9 @@ class Job:
             "info": self.info,
             "params": self.params,
             "images": [f"{base_url}/jobs/{self.id}/images/{i}" for i in range(len(self.images))],
+            # The query string changes with every new preview so clients can cache-bust on it.
+            "preview": f"{base_url}/jobs/{self.id}/preview?step={self.preview_step}" if self.preview_png else None,
+            "preview_step": self.preview_step,
         }
 
 
@@ -127,7 +134,17 @@ class JobManager:
                 job.message = msg
                 log.info("[%s] %s", job.id, msg)
 
-            hooks = Hooks(progress=progress, status=status, cancelled=lambda job=job: job.cancel_requested)
+            def preview(image, step, job=job):
+                buf = io.BytesIO()
+                image.save(buf, "PNG")
+                job.preview_png, job.preview_step = buf.getvalue(), step
+
+            hooks = Hooks(
+                progress=progress,
+                status=status,
+                cancelled=lambda job=job: job.cancel_requested,
+                preview=preview,
+            )
             try:
                 result = job.run(hooks)
                 if result is not None:
@@ -150,5 +167,5 @@ class JobManager:
             img.save(path)
             job.images.append(str(path))
         job.seed, job.prompt, job.variant, job.info = result.seed, result.prompt, result.variant, result.info
-        meta = {k: v for k, v in job.to_dict().items() if k != "images"} | {"files": [Path(p).name for p in job.images]}
+        meta = {k: v for k, v in job.to_dict().items() if k not in ("images", "preview")} | {"files": [Path(p).name for p in job.images]}
         (folder / "job.json").write_text(json.dumps(meta, indent=2, default=str))

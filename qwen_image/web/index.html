@@ -79,6 +79,13 @@
             <label class="field"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images"></label>
             <label class="field wide" data-show-cfg><span>Negative prompt</span><input type="text" data-role="negative" placeholder="used when CFG &gt; 1"></label>
             <label class="check wide" data-show="generate edit combine"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
+            <label class="field wide"><span>Live preview while generating</span>
+              <select data-role="preview">
+                <option value="fast" selected>Fast (approximate, every step)</option>
+                <option value="full">Full quality (every 5 steps, slower)</option>
+                <option value="off">Off</option>
+              </select>
+            </label>
 
             <label class="field wide" data-show="edit"><span>Show selection to model as</span>
               <select data-role="mask-mode">
