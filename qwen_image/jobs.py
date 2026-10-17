@@ -36,6 +36,7 @@ class Job:
     started: float | None = None
     finished: float | None = None
     images: list[str] = field(default_factory=list)
+    extras: dict[str, str] = field(default_factory=dict)
     seed: int | None = None
     prompt: str | None = None
     variant: str | None = None
@@ -63,6 +64,7 @@ class Job:
             "info": self.info,
             "params": self.params,
             "images": [f"{base_url}/jobs/{self.id}/images/{i}" for i in range(len(self.images))],
+            "extras": {name: f"{base_url}/jobs/{self.id}/extras/{name}" for name in self.extras},
             # The query string changes with every new preview so clients can cache-bust on it.
             "preview": f"{base_url}/jobs/{self.id}/preview?step={self.preview_step}" if self.preview_png else None,
             "preview_step": self.preview_step,
@@ -166,6 +168,10 @@ class JobManager:
             path = folder / f"{i}.png"
             img.save(path)
             job.images.append(str(path))
+        for name, img in result.extras.items():
+            path = folder / f"{name}.png"
+            img.save(path)
+            job.extras[name] = str(path)
         job.seed, job.prompt, job.variant, job.info = result.seed, result.prompt, result.variant, result.info
-        meta = {k: v for k, v in job.to_dict().items() if k not in ("images", "preview")} | {"files": [Path(p).name for p in job.images]}
+        meta = {k: v for k, v in job.to_dict().items() if k not in ("images", "preview", "extras")} | {"files": [Path(p).name for p in job.images]}
         (folder / "job.json").write_text(json.dumps(meta, indent=2, default=str))

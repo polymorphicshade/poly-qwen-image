@@ -209,3 +209,54 @@ def test_cli_edit_and_combine(tmp_path):
     assert cli_main(["edit", "-i", str(src), "-p", "night", "-m", "mock", "--box", "0,0,100,100", "-o", str(tmp_path / "e.png")]) == 0
     assert cli_main(["combine", "-i", str(src), "-i", str(src), "-p", "two", "-m", "mock", "-n", "2", "-o", str(tmp_path / "c.png")]) == 0
     assert (tmp_path / "c_1.png").exists() and (tmp_path / "c_2.png").exists()
+
+
+# ---------------------------------------------------------------- ControlNet (mock pipeline; no weights)
+
+
+def test_render_pose_draws_skeleton():
+    from qwen_image.annotators import render_pose, template_pose
+
+    img = render_pose(template_pose(384, 512), 384, 512)
+    assert img.size == (384, 512) and img.getbbox() is not None
+    assert img.getpixel((0, 0)) == (0, 0, 0)
+
+
+def test_api_controlnet_render_pose(client):
+    from qwen_image.annotators import template_pose
+
+    r = client.post("/api/controlnet/pose/render", json={"pose": template_pose(), "width": 300, "height": 400})
+    assert r.status_code == 200 and Image.open(io.BytesIO(r.content)).size == (300, 400)
+    assert client.post("/api/controlnet/pose/render", json={"pose": {"people": "x"}}).status_code == 400
+
+
+def test_api_controlnet_with_pose_returns_control_map(client):
+    from qwen_image.annotators import template_pose
+
+    data = {"prompt": "a knight", "control_type": "pose", "pose": json.dumps(template_pose(768, 1024)),
+            "resolution": "512", "variant": "mock", "wait": "true"}
+    job = _done(client, client.post("/api/controlnet", data=data))
+    out = Image.open(io.BytesIO(client.get(job["images"][0]).content))
+    assert out.width < out.height  # follows the pose canvas aspect (3:4)
+    cmap = Image.open(io.BytesIO(client.get(job["extras"]["control"]).content))
+    assert cmap.size == out.size
+
+
+def test_api_controlnet_references_get_tagged(client):
+    files = [("control", ("c.png", png(Image.new("RGB", (512, 512))), "image/png")),
+             ("references", ("r.png", png(make_image()), "image/png"))]
+    job = _done(client, client.post("/api/controlnet", data={"prompt": "dancing", "variant": "mock", "wait": "true"}, files=files))
+    assert "<image1>" in job["prompt"] and job["info"]["strength"] == 0.8
+
+
+def test_api_controlnet_needs_a_signal(client):
+    assert client.post("/api/controlnet", data={"prompt": "x", "variant": "mock"}).status_code == 400
+    bad = client.post("/api/controlnet", data={"prompt": "x", "variant": "mock", "pose": "{nope"})
+    assert bad.status_code == 400
+
+
+def test_api_controlnet_detect_canny(client):
+    job = _done(client, client.post("/api/controlnet/detect", data={"control_type": "canny", "wait": "true"},
+                                    files={"image": ("in.png", png(make_image()), "image/png")}))
+    edges = Image.open(io.BytesIO(client.get(job["images"][0]).content))
+    assert edges.size == (640, 480) and edges.getbbox() is not None

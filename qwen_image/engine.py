@@ -23,14 +23,6 @@ log = logging.getLogger(__name__)
 
 MAX_REFERENCES = 10
 
-# How a pose reference is described to the model, by pose_type.
-POSE_TYPES = {
-    "auto": "use the body pose of the figure in the first image",
-    "character": "a character or person demonstrating the pose",
-    "skeleton": "a stick-figure or skeleton drawing of the pose; read the limbs and joints as a human body",
-    "sketch": "a rough sketch or mannequin drawing of the pose",
-}
-
 
 class Cancelled(Exception):
     pass
@@ -75,6 +67,8 @@ class Result:
     prompt: str
     variant: str
     info: dict = field(default_factory=dict)
+    # Additional named images, e.g. the control map a ControlNet run used.
+    extras: dict = field(default_factory=dict)
 
 
 def transparent_prompt(prompt: str) -> str:
@@ -94,6 +88,10 @@ class Engine:
         self.variant: Variant | None = None
         self.pipe = None
         self._lock = threading.RLock()
+        self.control_branch = None
+        from .annotators import Annotators
+
+        self.annotators = Annotators()
 
     # ------------------------------------------------------------------ model management
 
@@ -139,6 +137,7 @@ class Engine:
         opts: Options,
         hooks: Hooks,
         variant: str | None,
+        pipe_kwargs: dict | None = None,
     ) -> tuple[list[Image.Image], int]:
         v = self.load(variant, hooks)
         pipe = self.pipe
@@ -185,6 +184,7 @@ class Engine:
         )
         if steps:
             kwargs["num_inference_steps"] = steps
+        kwargs.update(pipe_kwargs or {})
         if opts.cfg and opts.cfg > 1 and not v.turbo:
             kwargs["true_cfg_scale"] = opts.cfg
             kwargs["negative_prompt"] = opts.negative_prompt or " "
@@ -196,8 +196,9 @@ class Engine:
             raise Cancelled()
         return list(out.images), seed
 
-    def _result(self, images, seed, prompt, **info) -> Result:
-        return Result(images=images, seed=seed, prompt=prompt, variant=self.variant.name if self.variant else "", info=info)
+    def _result(self, images, seed, prompt, extras=None, **info) -> Result:
+        variant = self.variant.name if self.variant else ""
+        return Result(images=images, seed=seed, prompt=prompt, variant=variant, info=info, extras=extras or {})
 
     # ------------------------------------------------------------------ operations
 
@@ -276,48 +277,129 @@ class Engine:
             out.append(img if opts.transparent else _rgb_if_opaque(img))
         return self._result(out, seed, full, masked=has_mask, mask_mode=mask_mode if has_mask else None)
 
-    def pose(
+    # ------------------------------------------------------------------ ControlNet
+
+    def _control_branch(self, hooks: Hooks):
+        """The ControlNet-Union branch, loaded once and kept in CPU RAM between runs."""
+        from . import controlnet as cn
+
+        if self.control_branch is None:
+            self.control_branch = cn.load_branch(report=hooks.status)
+        return self.control_branch
+
+    def detect_control(
         self,
+        control_type: str,
         image: Image.Image,
-        pose_ref: Image.Image,
-        prompt: str = "",
-        pose_type: str = "auto",
-        keep_background: bool = True,
+        options: dict | None = None,
+        hooks: Hooks | None = None,
+    ) -> Result:
+        """Extract a control map (and, for pose, editable keypoints) from ``image``."""
+        hooks = hooks or Hooks()
+        hooks.status(f"Extracting {control_type} map")
+        with self._lock:
+            cmap, info = self.annotators.detect(control_type, image, **(options or {}))
+        return Result(images=[cmap], seed=-1, prompt="", variant="", info={"control_type": control_type, **info})
+
+    def controlnet(
+        self,
+        prompt: str,
+        control_type: str = "pose",
+        control_map: Image.Image | None = None,
+        source: Image.Image | None = None,
+        pose: dict | None = None,
+        references: list[Image.Image] | None = None,
+        inpaint_image: Image.Image | None = None,
+        mask: Image.Image | None = None,
+        strength: float | None = None,
+        keep_outside: bool = True,
+        feather_px: float = 8.0,
+        invert: bool = False,
+        detect_options: dict | None = None,
         opts: Options | None = None,
         hooks: Hooks | None = None,
         variant: str | None = None,
     ) -> Result:
-        """Re-pose the subject of ``image`` to match the pose shown in ``pose_ref``.
+        """Generate guided by a control signal (Qwen-Image-2.1 Fun ControlNet-Union).
 
-        ``pose_ref`` can be another character or photo in the target pose, or a drawing of the
-        pose (stick figure, skeleton, mannequin sketch); ``pose_type`` says which, or ``auto``.
-        Both images are passed as conditions with the subject image last, so the output keeps
-        its aspect ratio; only the pose is taken from the reference, never its appearance.
+        The control signal is, in order of precedence: ``pose`` keypoints (rendered as a skeleton),
+        a ready-made ``control_map``, or a ``source`` image that is run through the ``control_type``
+        preprocessor. ``references`` are optional subject images whose look is kept (e.g. re-posing
+        a character); with them, ``strength`` defaults to 0.8 so the reference can still shape the
+        result. ``inpaint_image`` + ``mask`` repaint only the masked region (white = repaint), and
+        can be combined with a control signal so the repainted part also follows it.
         """
+        from . import annotators as ann
+        from . import controlnet as cn
+
         opts, hooks = opts or Options(), hooks or Hooks()
-        if pose_type not in POSE_TYPES:
-            raise ValueError(f"pose_type must be one of {', '.join(POSE_TYPES)}")
-        source = POSE_TYPES[pose_type]
-        parts = [
-            f"Change the pose of the subject in the second image so that it exactly matches the pose shown in the first image ({source}).",
-            "Match the placement and angles of the head, torso, arms, hands, legs and feet.",
-            "Keep the subject of the second image the same: same identity, face, hairstyle, clothing, colours, "
-            "body proportions and art style. Take only the pose from the first image, not its appearance, clothing or style.",
-        ]
-        if keep_background:
-            parts.append("Keep the background, lighting and framing of the second image.")
-        if prompt.strip():
-            parts.append(prompt.strip().rstrip(".") + ".")
-        full = " ".join(parts)
+        references = list(references or [])
+        if not prompt.strip():
+            raise ValueError("A prompt describing the image is required")
+        if control_type not in ann.CONTROL_TYPES:
+            raise ValueError(f"control_type must be one of {', '.join(ann.CONTROL_TYPES)}")
+        if len(references) > MAX_REFERENCES:
+            raise ValueError(f"At most {MAX_REFERENCES} reference images are supported")
+        has_mask = not sel.is_empty(mask)
+        if inpaint_image is not None and not has_mask:
+            raise ValueError("Inpainting needs a mask over the region to repaint")
+        if pose is None and control_map is None and source is None and inpaint_image is None:
+            raise ValueError("Provide a control map, a source image to extract one from, pose keypoints, or an image to inpaint")
+
+        # Output size: explicit, else the aspect of whatever defines the layout.
+        if opts.width or opts.height:
+            width, height = output_dims(opts.width, opts.height, None, opts.resolution)
+        else:
+            basis = inpaint_image or control_map or source
+            if basis is None and pose is not None:
+                basis = Image.new("L", (int(pose.get("width") or 768), int(pose.get("height") or 1024)))
+            width, height = output_dims(None, None, [basis] if basis is not None else None, opts.resolution)
+
+        if pose is not None:
+            cmap = ann.render_pose(ann.validate_pose(pose), width, height)
+        elif control_map is not None:
+            cmap = ann.prepare_map(control_map, invert).resize((width, height), Image.Resampling.BILINEAR)
+        elif source is not None:
+            hooks.status(f"Extracting {control_type} map")
+            with self._lock:
+                cmap, _ = self.annotators.detect(control_type, source, **(detect_options or {}))
+            cmap = cmap.resize((width, height), Image.Resampling.BILINEAR)
+        else:
+            cmap = None  # pure inpainting
+
+        if strength is None:
+            strength = 0.8 if references else 1.0
+        full = prompt.strip()
+        if references and "<image" not in full:
+            tags = ", ".join(f"<image{i + 1}>" for i in range(len(references)))
+            subject = "subject" if len(references) == 1 else "subjects"
+            full = f"A new image of the same {subject} as in {tags}, keeping their identity, appearance and clothing: {full}"
         if opts.transparent:
             full = transparent_prompt(full)
-        imgs, seed = self._run(full, [pose_ref, image], opts, hooks, variant)
+
+        v = self.load(variant, hooks)
+        run_opts = Options(**{**opts.__dict__, "width": width, "height": height})
+        inpaint = inpaint_image.resize((width, height), Image.Resampling.LANCZOS) if inpaint_image is not None else None
+        region = mask.resize((width, height), Image.Resampling.NEAREST) if has_mask else None
+        if v.name == "mock":
+            imgs, seed = self._run(full, references, run_opts, hooks, variant)
+        else:
+            branch = self._control_branch(hooks)
+            hooks.status("Encoding control signal")
+            ctx = cn.build_context(self.pipe, width, height, control_image=cmap, inpaint_image=inpaint, mask=region)
+            with cn.attached(self.pipe.transformer, branch, ctx, float(strength)):
+                imgs, seed = self._run(full, references, run_opts, hooks, variant, pipe_kwargs={"use_kv_cache": False})
+
         out = []
         for img in imgs:
-            if opts.width is None and opts.height is None:
-                img = img.resize(image.size, Image.Resampling.LANCZOS)
+            if inpaint is not None and keep_outside:
+                img = sel.composite_inside(inpaint, img, region, feather_px)
             out.append(img if opts.transparent else _rgb_if_opaque(img))
-        return self._result(out, seed, full, pose_type=pose_type)
+        extras = {"control": cmap} if cmap is not None else {}
+        return self._result(
+            out, seed, full, control_type=control_type, strength=strength, references=len(references),
+            inpaint=inpaint is not None, size=[width, height], extras=extras,
+        )
 
     def face(
         self,

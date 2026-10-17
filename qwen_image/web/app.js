@@ -38,10 +38,10 @@ const MODES = {
     promptLabel: "Edit instruction", placeholder: "Change the background to a sunset beach…",
     run: "Apply edit",
   },
-  pose: {
-    help: "Make the subject of one image take the pose from another. The pose reference can be a character, a photo, or a simple stick figure.",
-    promptLabel: "Extra instructions (optional)", placeholder: "keep the sword in the right hand…",
-    run: "Apply pose",
+  controlnet: {
+    help: "Guide the layout with a control signal: a pose skeleton, edges, depth, line art, scribble… Add subject references to keep a specific character's look.",
+    promptLabel: "Describe the image to create", placeholder: "A knight in silver armour in a misty forest, cinematic light…",
+    imagesLabel: "Subject references (optional) — keep a character's look", run: "Generate", min: 0, max: 10,
   },
   face: {
     help: "Give the person in the image on the right the face from the reference, to keep a character consistent across images. Outline the face if there are several people.",
@@ -120,6 +120,7 @@ class Workspace {
     this.ctx = this.canvas.getContext("2d");
 
     this.bind();
+    this.cn = new ControlStage(this);
     this.fillVariants();
     this.restore(saved);
     this.setMode(saved.mode || "generate");
@@ -130,7 +131,8 @@ class Workspace {
   // --- persistence (settings only; images live in memory)
   settingRoles() {
     return ["prompt", "variant", "aspect", "resolution", "steps", "seed", "cfg", "num-images", "negative",
-      "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "pose-type", "keep-background", "keep-hair", "keep-expression", "bg-method", "keep-subject"];
+      "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "keep-hair", "keep-expression", "bg-method", "keep-subject", "cn-type", "cn-is-map", "cn-invert", "cn-hands", "cn-strength",
+      "cn-auto-strength", "cn-inpaint", "cn-show-source"];
   }
   snapshot() {
     const s = { name: this.name, mode: this.mode, settings: {} };
@@ -193,7 +195,7 @@ class Workspace {
     });
   }
 
-  // --- named single-image slots (e.g. pose reference + subject)
+  // --- named single-image slots (e.g. the face reference or the control source)
   bindSlots() {
     this.slots = {};
     $$("[data-slot]", this.el).forEach(slot => {
@@ -210,6 +212,7 @@ class Workspace {
     const old = this.slots[name];
     if (old) URL.revokeObjectURL(old.url);
     this.slots[name] = blob ? blobItem(blob, blob.name || `${name}.png`) : null;
+    if (name === "cnsource" && this.cn) this.cn.setSource(blob);
     const slot = $(`[data-slot="${name}"]`, this.el);
     const img = slot.querySelector("img");
     img.hidden = !blob;
@@ -223,7 +226,9 @@ class Workspace {
     return $$("[data-slot]", this.el).filter(s => !s.closest("[data-show]")?.hidden).map(s => s.dataset.slot);
   }
 
-  usesEditor() { return EDITOR_MODES.includes(this.mode); }
+  usesEditor() {
+    return EDITOR_MODES.includes(this.mode) || (this.mode === "controlnet" && this.r("cn-inpaint").checked);
+  }
 
   setMode(mode) {
     this.mode = mode;
@@ -238,16 +243,23 @@ class Workspace {
       isolate: "Draw around the subject with the lasso (or paint over it). A loose outline is fine — for small items, outline just that item.",
       face: "Open the image whose face should change. Optional: outline the face (and hair, if transferring it) when there are several people.",
       background: "Open the image whose subject you want to keep. Optional: outline the subject when the image has several.",
+      controlnet: "Open the image to repaint and select the region to change; the rest is kept. The repainted part follows the control map too, if there is one.",
     }[mode] || "Optional: select the area to change. Leave empty to edit the whole image.";
     this.updateVisibility();
     this.renderThumbs();
     if (this.usesEditor()) requestAnimationFrame(() => this.render());
+    if (mode === "controlnet") requestAnimationFrame(() => this.cn.sync());
   }
 
   updateVisibility() {
     $$("[data-show]", this.el).forEach(el => el.hidden = !el.dataset.show.split(" ").includes(this.mode));
     $$("[data-show-cfg]", this.el).forEach(el => el.hidden = !(parseFloat(this.r("cfg").value) > 1));
     this.r("single-drop").hidden = !!this.single;
+    if (this.mode === "controlnet") {
+      const inpaint = this.r("cn-inpaint").checked;
+      $(".editor", this.el).hidden = !inpaint;
+      this.r("keep-outside-row").hidden = !inpaint;
+    }
   }
 
   // --- image inputs
@@ -258,6 +270,7 @@ class Workspace {
       this.multi.push(blobItem(f, f.name));
     }
     this.renderThumbs();
+    if (this.cn) this.cn.sync();
   }
 
   renderThumbs() {
@@ -269,7 +282,12 @@ class Workspace {
       t.innerHTML = `<img alt=""><span class="idx">${i + 1}</span><button title="Remove" aria-label="Remove">×</button>`;
       t.querySelector("img").src = item.url;
       t.querySelector("img").onclick = () => lightbox(item.url);
-      t.querySelector("button").onclick = () => { URL.revokeObjectURL(item.url); this.multi.splice(i, 1); this.renderThumbs(); };
+      t.querySelector("button").onclick = () => {
+        URL.revokeObjectURL(item.url);
+        this.multi.splice(i, 1);
+        this.renderThumbs();
+        if (this.cn) this.cn.sync();
+      };
       box.appendChild(t);
     });
   }
@@ -419,7 +437,7 @@ class Workspace {
     const aspect = this.r("aspect").value;
     const res = parseInt(this.r("resolution").value, 10);
     form.append("resolution", res);
-    if (aspect !== "auto" && this.mode !== "isolate") {
+    if (aspect !== "auto" && !["isolate", "face", "background"].includes(this.mode)) {
       const a = ASPECTS[aspect];
       form.append("width", Math.round(res * Math.sqrt(a) / 32) * 32);
       form.append("height", Math.round(res / Math.sqrt(a) / 32) * 32);
@@ -447,15 +465,23 @@ class Workspace {
       f.append("transparent", this.r("transparent").checked);
       const field = this.mode === "generate" ? "references" : "images";
       this.multi.forEach(item => f.append(field, item.blob, item.name));
-    } else if (this.mode === "pose") {
-      if (!this.slots.pose) throw new Error("Add a pose reference image.");
-      if (!this.slots.subject) throw new Error("Add the image whose subject should be re-posed.");
-      f.append("pose", this.slots.pose.blob, this.slots.pose.name);
-      f.append("image", this.slots.subject.blob, this.slots.subject.name);
+    } else if (this.mode === "controlnet") {
+      if (!prompt) throw new Error("Describe the image to create.");
       f.append("prompt", prompt);
-      f.append("pose_type", this.r("pose-type").value);
-      f.append("keep_background", this.r("keep-background").checked);
+      f.append("control_type", this.r("cn-type").value);
       f.append("transparent", this.r("transparent").checked);
+      if (!this.r("cn-auto-strength").checked) f.append("strength", this.r("cn-strength").value);
+      this.multi.forEach(item => f.append("references", item.blob, item.name));
+      const hasControl = this.cn.appendTo(f);
+      const inpaint = this.r("cn-inpaint").checked;
+      if (inpaint) {
+        if (!this.single) throw new Error("Open the image to repaint (below the control map).");
+        if (!this.hasSelection()) throw new Error("Select the region to repaint.");
+        f.append("image", this.single.blob, this.single.name);
+        f.append("mask", await this.maskBlob(), "mask.png");
+        f.append("keep_outside", this.r("keep-outside").checked);
+      }
+      if (!hasControl && !inpaint) throw new Error("Add a control source, draw a pose, or turn on inpainting.");
     } else {
       if (!this.single) throw new Error("Open an image first.");
       f.append("image", this.single.blob, this.single.name);
@@ -614,6 +640,7 @@ class Workspace {
           <button data-a="edit">Edit</button>
           <button data-a="isolate">Isolate</button>
           <button data-a="ref">Use as input</button>
+          <button data-a="cmap" hidden>Control map</button>
           <button data-a="tab">New tab</button>
         </div>`;
       const img = card.querySelector("img");
@@ -629,9 +656,15 @@ class Workspace {
       card.querySelector('[data-a="isolate"]').onclick = () => { this.setMode("isolate"); this.setSingle(item.blob); };
       card.querySelector('[data-a="ref"]').onclick = () => {
         if (this.usesEditor()) this.setSingle(item.blob);
-        else if (this.mode === "pose") this.setSlot("subject", item.blob);
+        else if (this.mode === "controlnet") this.setSlot("cnsource", item.blob);
         else this.addMulti([new File([item.blob], item.name, { type: "image/png" })]);
       };
+      const cmap = j.extras && j.extras.control;
+      if (cmap) {
+        const btn = card.querySelector('[data-a="cmap"]');
+        btn.hidden = false;
+        btn.onclick = () => lightbox(cmap);
+      }
       card.querySelector('[data-a="tab"]').onclick = () => {
         const ws = createTab({ mode: "edit" });
         ws.setSingle(item.blob);
@@ -822,6 +855,30 @@ function renderModels() {
     row.querySelector('[data-a="load"]').onclick = e => runJob("/api/models/load", e.target);
     list.appendChild(row);
   }
+  const cn = models.controlnet;
+  if (cn) {
+    const row = document.createElement("div");
+    row.className = "model-row" + (cn.loaded ? " loaded" : "");
+    row.innerHTML = `
+      <div class="title">ControlNet-Union add-on</div>
+      <div class="desc"></div>
+      <div class="btns"><button data-a="download" ${cn.downloaded ? "hidden" : ""}>Download</button></div>`;
+    const badge = document.createElement("span");
+    badge.className = "badge" + (cn.downloaded ? " ok" : "");
+    badge.textContent = cn.loaded ? "loaded" : cn.downloaded ? "downloaded" : `~${cn.approx_download_gb} GB`;
+    row.querySelector(".title").appendChild(badge);
+    row.querySelector(".desc").textContent = `${cn.repo} — pose, edges, depth, line art, scribble and inpainting control for the ControlNet tab. Works with every variant; downloads on first use.`;
+    row.querySelector('[data-a="download"]').onclick = async e => {
+      e.target.disabled = true;
+      try {
+        const job = await api.post("/api/controlnet/download", new FormData());
+        const final = await api.waitJob(job.id, j => { e.target.textContent = (j.message || j.status).slice(0, 40); });
+        if (final.status === "error") alert(final.error);
+      } catch (err) { alert(err.message); }
+      await refreshModels();
+    };
+    list.appendChild(row);
+  }
 }
 
 // ----------------------------------------------------------------------------- global events
@@ -851,11 +908,15 @@ document.addEventListener("paste", e => {
   const empty = slots.find(n => !ws.slots[n]);
   if (empty) ws.setSlot(empty, files[0]);
   else if (ws.usesEditor()) ws.setSingle(files[0]);
+  else if (ws.mode === "controlnet") ws.addMulti(files);
   else if (slots.length) ws.setSlot(slots[slots.length - 1], files[0]);
   else ws.addMulti(files);
 });
 
-window.addEventListener("resize", () => workspaces.get(activeId)?.render());
+window.addEventListener("resize", () => {
+  const ws = workspaces.get(activeId);
+  if (ws) { ws.render(); ws.cn.render(); }
+});
 
 restoreTabs();
 refreshModels();

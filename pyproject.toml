@@ -17,6 +17,8 @@ dependencies = [
     "accelerate",
     "huggingface_hub",
     "gguf",
+    # ControlNet preprocessors (pose, HED, line art, MLSD); pulls in opencv.
+    "controlnet_aux",
     "bitsandbytes",
     "pillow",
     "numpy",

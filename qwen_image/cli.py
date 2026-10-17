@@ -2,7 +2,8 @@
 
     qwen-image generate -p "a red fox in snow" -o fox.png
     qwen-image edit -i fox.png -p "make it night" --box 100,100,400,400
-    qwen-image pose -i hero.png --pose stick_figure.png --pose-type skeleton
+    qwen-image controlnet -p "a knight in silver armour" --type pose --source dancer.png -r knight.png
+    qwen-image detect -i dancer.png --type pose -o pose.png --pose-json pose.json
     qwen-image face -i scene.png --face hero_portrait.png [--box 300,80,420,220]
     qwen-image combine -i cat.png -i hat.png -p "the cat wearing the hat"
     qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight"
@@ -17,6 +18,7 @@ Operations run in-process by default (the model loads once per invocation). Pass
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import logging
 import sys
@@ -95,13 +97,31 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--feather", type=float, default=8.0)
     _add_common(p)
 
-    p = sub.add_parser("pose", help="re-pose an image's subject to match a pose reference")
-    p.add_argument("--image", "-i", required=True, help="image whose subject should be re-posed")
-    p.add_argument("--pose", required=True, help="pose reference: a character/photo in the pose, or a stick figure / sketch")
-    p.add_argument("--prompt", "-p", default="", help="optional extra instructions")
-    p.add_argument("--pose-type", choices=["auto", "character", "skeleton", "sketch"], default="auto")
-    p.add_argument("--no-keep-background", dest="keep_background", action="store_false", help="allow the background to change")
+    p = sub.add_parser("controlnet", help="generate guided by a control map: pose, edges, depth, line art, ...")
+    p.add_argument("--prompt", "-p", required=True, help="describe the whole image to create")
+    p.add_argument("--type", dest="control_type", default="pose",
+                   choices=["pose", "canny", "depth", "lineart", "softedge", "mlsd", "scribble", "grayscale"])
+    g = p.add_argument_group("control signal (one of)")
+    g.add_argument("--control", help="a ready-made control map (white features on black)")
+    g.add_argument("--source", help="an image to extract the control map from with the --type preprocessor")
+    g.add_argument("--pose-json", help="pose keypoints JSON (from 'detect --pose-json' or hand-made)")
+    p.add_argument("--reference", "-r", action="append", default=[], help="subject image whose look to keep (repeatable, up to 10)")
+    p.add_argument("--strength", type=float, help="control strength 0-1.5 (default 1.0, or 0.8 with references)")
+    p.add_argument("--invert", action="store_true", help="invert the control map (black-on-white drawings)")
+    p.add_argument("--inpaint", help="only repaint part of this image; select the region with --mask/--polygon/--box")
+    _add_selection(p)
+    p.add_argument("--no-keep-outside", dest="keep_outside", action="store_false", help="inpainting: let pixels outside the mask change")
+    p.add_argument("--save-control", help="also save the control map that was used")
     _add_common(p)
+
+    p = sub.add_parser("detect", help="extract a control map (and pose keypoints) from an image")
+    p.add_argument("--image", "-i", required=True)
+    p.add_argument("--type", dest="control_type", default="pose",
+                   choices=["pose", "canny", "depth", "lineart", "softedge", "mlsd", "scribble", "grayscale"])
+    p.add_argument("--options", help='JSON detector options, e.g. \'{"low_threshold": 50}\' for canny')
+    p.add_argument("--pose-json", help="pose: also save the keypoints as JSON (editable, reusable with controlnet --pose-json)")
+    p.add_argument("--output", "-o", default=None)
+    p.add_argument("--api", help="run on a server, e.g. http://127.0.0.1:7860")
 
     p = sub.add_parser("face", help="give an image's subject the face from a reference image")
     p.add_argument("--image", "-i", required=True, help="image whose subject's face should change")
@@ -243,8 +263,17 @@ def run_local(args) -> tuple[list, dict]:
     elif args.command == "edit":
         image = _open(args.image)
         r = engine.edit(image, args.prompt, _local_mask(args, image.size), args.mask_mode, args.keep_outside, args.feather, opts, hooks)
-    elif args.command == "pose":
-        r = engine.pose(_open(args.image), _open(args.pose), args.prompt, args.pose_type, args.keep_background, opts, hooks)
+    elif args.command == "controlnet":
+        inpaint = _open(args.inpaint) if args.inpaint else None
+        r = engine.controlnet(
+            args.prompt, args.control_type,
+            control_map=_open(args.control) if args.control else None,
+            source=_open(args.source) if args.source else None,
+            pose=json.loads(Path(args.pose_json).read_text()) if args.pose_json else None,
+            references=[_open(p) for p in args.reference],
+            inpaint_image=inpaint, mask=_local_mask(args, inpaint.size) if inpaint else None,
+            strength=args.strength, keep_outside=args.keep_outside, invert=args.invert, opts=opts, hooks=hooks,
+        )
     elif args.command == "face":
         image = _open(args.image)
         r = engine.face(
@@ -269,15 +298,13 @@ def run_local(args) -> tuple[list, dict]:
         )
     else:
         raise AssertionError(args.command)
-    return r.images, {"seed": r.seed, "prompt": r.prompt, "variant": r.variant, "info": r.info}
+    return r.images, {"seed": r.seed, "prompt": r.prompt, "variant": r.variant, "info": r.info, "_extras": r.extras}
 
 
 # ---------------------------------------------------------------------- remote execution
 
 
 def run_remote(args) -> tuple[list, dict]:
-    import io
-
     import httpx
     from PIL import Image
 
@@ -302,10 +329,25 @@ def run_remote(args) -> tuple[list, dict]:
         data["prompt"] = args.prompt
         for p in args.image:
             attach("images", p)
-    elif args.command == "pose":
-        attach("image", args.image)
-        attach("pose", args.pose)
-        data |= {"prompt": args.prompt, "pose_type": args.pose_type, "keep_background": str(args.keep_background).lower()}
+    elif args.command == "controlnet":
+        data |= {"prompt": args.prompt, "control_type": args.control_type, "invert": str(args.invert).lower(),
+                 "keep_outside": str(args.keep_outside).lower()}
+        if args.strength is not None:
+            data["strength"] = str(args.strength)
+        if args.control:
+            attach("control", args.control)
+        if args.source:
+            attach("source", args.source)
+        if args.pose_json:
+            data["pose"] = Path(args.pose_json).read_text()
+        for ref in args.reference:
+            attach("references", ref)
+        if args.inpaint:
+            attach("image", args.inpaint)
+            if args.mask:
+                attach("mask", args.mask)
+            if args.polygon or args.box:
+                data["selection"] = json.dumps({"polygons": args.polygon, "boxes": args.box})
     elif args.command in ("edit", "isolate", "face", "background"):
         attach("image", args.image)
         if args.mask:
@@ -353,7 +395,9 @@ def run_remote(args) -> tuple[list, dict]:
         if job["status"] != "done":
             raise SystemExit(f"Job {job['status']}: {job.get('error') or ''}")
         images = [Image.open(io.BytesIO(client.get(base + url).content)) for url in job["images"]]
-    return images, {"seed": job["seed"], "prompt": job["prompt"], "variant": job["variant"], "info": job["info"], "job": job["id"]}
+        extras = {name: Image.open(io.BytesIO(client.get(base + url).content)) for name, url in job.get("extras", {}).items()}
+    meta = {"seed": job["seed"], "prompt": job["prompt"], "variant": job["variant"], "info": job["info"], "job": job["id"]}
+    return images, meta | {"_extras": extras}
 
 
 # ---------------------------------------------------------------------- commands
@@ -393,6 +437,37 @@ def cmd_serve(args) -> int:
     return 0
 
 
+def cmd_detect(args) -> int:
+    out = Path(args.output or f"{Path(args.image).stem}_{args.control_type}.png")
+    options = json.loads(args.options) if args.options else {}
+    if args.api:
+        import httpx
+        from PIL import Image
+
+        base = args.api.rstrip("/")
+        with httpx.Client(timeout=httpx.Timeout(60.0, read=None)) as client, open(args.image, "rb") as fh:
+            data = {"control_type": args.control_type, "options": json.dumps(options), "wait": "true"}
+            resp = client.post(f"{base}/api/controlnet/detect", data=data, files={"image": (Path(args.image).name, fh)})
+            if resp.status_code >= 400:
+                raise SystemExit(f"Server error {resp.status_code}: {resp.text}")
+            job = resp.json()
+            if job["status"] != "done":
+                raise SystemExit(f"Job {job['status']}: {job.get('error') or ''}")
+            cmap = Image.open(io.BytesIO(client.get(base + job["images"][0]).content))
+            info = job["info"]
+    else:
+        from .annotators import Annotators
+
+        cmap, info = Annotators().detect(args.control_type, _open(args.image), **options)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    cmap.save(out)
+    print(out)
+    if args.pose_json and info.get("pose"):
+        Path(args.pose_json).write_text(json.dumps(info["pose"], indent=1))
+        print(args.pose_json)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -400,11 +475,17 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_models(args)
     if args.command == "serve":
         return cmd_serve(args)
+    if args.command == "detect":
+        return cmd_detect(args)
     if args.command == "combine" and not 2 <= len(args.image) <= 10:
         raise SystemExit("combine needs between 2 and 10 --image arguments")
 
     _resolve_preview(args)
     images, meta = run_remote(args) if args.api else run_local(args)
+    extras = meta.pop("_extras", {})
+    if getattr(args, "save_control", None) and "control" in extras:
+        extras["control"].save(args.save_control)
+        meta["control_map"] = args.save_control
     paths = _output_paths(args, len(images))
     for img, path in zip(images, paths):
         path.parent.mkdir(parents=True, exist_ok=True)

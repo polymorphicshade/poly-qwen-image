@@ -9,17 +9,18 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import logging
 from pathlib import Path
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from PIL import Image, ImageOps, UnidentifiedImageError
 
 from . import __version__
 from . import selection as sel
-from .engine import POSE_TYPES, Engine, Options
+from .engine import Engine, Options
 from .jobs import TERMINAL, Job, JobManager
 from .preview import MODES as PREVIEW_MODES
 from .variants import DEFAULT_VARIANT, get_variant, list_variants
@@ -87,6 +88,25 @@ def _check_variant(variant: str | None) -> str | None:
     return variant or None
 
 
+def _check_control_type(control_type: str) -> None:
+    from .annotators import CONTROL_TYPES
+
+    if control_type not in CONTROL_TYPES:
+        raise HTTPException(400, f"control_type must be one of {', '.join(CONTROL_TYPES)}")
+
+
+def _json_field(text: str | None, name: str) -> dict:
+    if not text:
+        return {}
+    try:
+        value = json.loads(text)
+    except ValueError as e:
+        raise HTTPException(400, f"'{name}' is not valid JSON: {e}") from e
+    if not isinstance(value, dict):
+        raise HTTPException(400, f"'{name}' must be a JSON object")
+    return value
+
+
 def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs") -> FastAPI:
     engine = engine or Engine(DEFAULT_VARIANT)
     jobs = JobManager(engine, output_dir)
@@ -133,7 +153,15 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
             return v.to_dict() | {"downloaded": downloaded, "loaded": bool(engine.variant and engine.variant.name == v.name)}
 
         rows = await asyncio.gather(*(row(v) for v in list_variants()))
+        from . import controlnet as cn
+
         return {
+            "controlnet": {
+                "repo": cn.CONTROLNET_REPO,
+                "approx_download_gb": cn.CONTROLNET_GB,
+                "downloaded": await asyncio.to_thread(cn.is_downloaded),
+                "loaded": engine.control_branch is not None,
+            },
             "default": engine.default_variant or DEFAULT_VARIANT,
             "loaded": engine.variant.name if engine.variant else None,
             "variants": rows,
@@ -210,29 +238,103 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         )
         return await respond(job, wait)
 
-    @app.post("/api/pose", status_code=202, summary="Re-pose the subject of an image to match a pose reference")
-    async def pose(
-        image: UploadFile = File(..., description="Image whose subject should be re-posed"),
-        pose: UploadFile = File(..., description="Pose reference: a character/photo in the pose, or a stick figure / sketch"),
-        prompt: str = Form("", description="Optional extra instructions"),
-        pose_type: str = Form("auto", description="'auto', 'character', 'skeleton' or 'sketch'"),
-        keep_background: bool = Form(True, description="Keep the subject image's background and framing"),
+    # ------------------------------------------------------------------ ControlNet
+
+    @app.get("/api/controlnet/types", summary="Control types, plus a template pose to start drawing from")
+    def controlnet_types():
+        from .annotators import CONTROL_TYPES, template_pose
+
+        return {"types": CONTROL_TYPES, "template_pose": template_pose()}
+
+    @app.post("/api/controlnet/download", status_code=202, summary="Download the ControlNet-Union weights")
+    async def controlnet_download(wait: bool = Form(False)):
+        from . import controlnet as cn
+
+        return await respond(jobs.submit("download", {"variant": "controlnet"}, lambda hooks: cn.download(hooks.status) and None), wait)
+
+    @app.post("/api/controlnet/detect", status_code=202, summary="Extract a control map (and pose keypoints) from an image")
+    async def controlnet_detect(
+        image: UploadFile = File(..., description="Image to extract the control map from"),
+        control_type: str = Form("pose", description="pose, canny, depth, lineart, softedge, mlsd, scribble or grayscale"),
+        options: str | None = Form(None, description='JSON detector options, e.g. {"low_threshold": 100, "high_threshold": 200} for canny, {"hands": true, "face": true} for pose'),
+        wait: bool = Form(False),
+    ):
+        _check_control_type(control_type)
+        img = _read_image(image, "image")
+        opt = _json_field(options, "options")
+        job = jobs.submit("detect", {"control_type": control_type, "options": opt}, lambda hooks: engine.detect_control(control_type, img, opt, hooks))
+        return await respond(job, wait)
+
+    @app.post("/api/controlnet/pose/render", summary="Render pose keypoints to a control map (PNG)")
+    def controlnet_render_pose(body: dict = Body(..., examples=[{"pose": {"width": 768, "height": 1024, "people": []}, "width": 768, "height": 1024}])):
+        from .annotators import render_pose, validate_pose
+
+        try:
+            pose = validate_pose(body.get("pose"))
+            width = int(body.get("width") or pose.get("width") or 768)
+            height = int(body.get("height") or pose.get("height") or 1024)
+        except (ValueError, TypeError) as e:
+            raise HTTPException(400, str(e)) from e
+        if not (64 <= width <= 4096 and 64 <= height <= 4096):
+            raise HTTPException(400, "width and height must be between 64 and 4096")
+        buf = io.BytesIO()
+        render_pose(pose, width, height, hands=body.get("hands", True), face=body.get("face", True)).save(buf, "PNG")
+        return Response(buf.getvalue(), media_type="image/png")
+
+    @app.post("/api/controlnet", status_code=202, summary="Generate guided by a ControlNet signal (pose, edges, depth, ...)")
+    async def controlnet(
+        prompt: str = Form(..., description="Describe the whole image to create"),
+        control_type: str = Form("pose", description="pose, canny, depth, lineart, softedge, mlsd, scribble or grayscale"),
+        control: UploadFile | None = File(None, description="A ready-made control map (white features on black)"),
+        source: UploadFile | None = File(None, description="An image to extract the control map from with the control_type preprocessor"),
+        pose: str | None = Form(None, description="Pose keypoints JSON (see /api/controlnet/detect); rendered as the control map"),
+        references: list[UploadFile] = File(default=[], description="Optional subject images whose look to keep (up to 10)"),
+        image: UploadFile | None = File(None, description="Optional image to inpaint (needs mask or selection)"),
+        mask: UploadFile | None = File(None, description="Inpaint mask over image: white/opaque = repaint"),
+        selection: str | None = Form(None, description='Inpaint region as JSON: {"polygons": [[[x,y],...]], "boxes": [[x0,y0,x1,y1]]}'),
+        strength: float | None = Form(None, description="Control strength, 0-1.5 (default 1.0, or 0.8 with references)"),
+        invert: bool = Form(False, description="Invert the control map (for black-on-white drawings)"),
+        keep_outside: bool = Form(True, description="Inpainting: restore original pixels outside the mask"),
+        detect_options: str | None = Form(None, description="JSON options for the preprocessor when 'source' is given"),
         width: int | None = f["width"], height: int | None = f["height"], steps: int | None = f["steps"],
         seed: int | None = f["seed"], cfg: float = f["cfg"], negative_prompt: str | None = f["negative_prompt"],
         num_images: int = f["num_images"], resolution: int = f["resolution"], transparent: bool = f["transparent"],
         variant: str | None = f["variant"], wait: bool = f["wait"],
         preview: str = f["preview"], preview_every: int | None = f["preview_every"],
     ):
-        if pose_type not in POSE_TYPES:
-            raise HTTPException(400, f"pose_type must be one of {', '.join(POSE_TYPES)}")
+        from .annotators import validate_pose
+
+        _check_control_type(control_type)
+        if strength is not None and not 0 <= strength <= 2:
+            raise HTTPException(400, "strength must be between 0 and 2")
         opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview, preview_every)
-        img = _read_image(image, "image")
-        ref = _read_image(pose, "pose")
+        cmap = _read_image(control, "control") if control is not None and control.filename else None
+        src = _read_image(source, "source") if source is not None and source.filename else None
+        pose_data = None
+        if pose:
+            try:
+                pose_data = validate_pose(json.loads(pose))
+            except ValueError as e:
+                raise HTTPException(400, f"Invalid pose: {e}") from e
+        refs = [_read_image(r, "references") for r in references if r.filename]
+        base = _read_image(image, "image") if image is not None and image.filename else None
+        region = _selection_mask(base.size, mask, selection) if base is not None else None
+        if base is not None and sel.is_empty(region):
+            raise HTTPException(400, "Inpainting needs a mask or selection over the region to repaint")
+        if cmap is None and src is None and pose_data is None and base is None:
+            raise HTTPException(400, "Provide 'control', 'source', 'pose', or an 'image' + mask to inpaint")
+        det = _json_field(detect_options, "detect_options")
         v = _check_variant(variant)
-        params = {"prompt": prompt, "pose_type": pose_type, "keep_background": keep_background} | opts.__dict__
+        params = {
+            "prompt": prompt, "control_type": control_type, "strength": strength, "references": len(refs),
+            "inpaint": base is not None, "control_from": "pose" if pose_data else "map" if cmap else "source" if src else "none",
+        } | opts.__dict__
         job = jobs.submit(
-            "pose", params,
-            lambda hooks: engine.pose(img, ref, prompt, pose_type, keep_background, opts, hooks, v),
+            "controlnet", params,
+            lambda hooks: engine.controlnet(
+                prompt, control_type, cmap, src, pose_data, refs, base, region, strength, keep_outside,
+                invert=invert, detect_options=det, opts=opts, hooks=hooks, variant=v,
+            ),
         )
         return await respond(job, wait)
 
@@ -378,6 +480,13 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
             media_type="image/png",
             headers={"Cache-Control": "no-store", "X-Preview-Step": str(job.preview_step)},
         )
+
+    @app.get("/api/jobs/{job_id}/extras/{name}", summary="Additional job output, e.g. the control map used")
+    def job_extra(job_id: str, name: str):
+        job = _job(job_id)
+        if name not in job.extras:
+            raise HTTPException(404, "No such output")
+        return FileResponse(job.extras[name], media_type="image/png")
 
     @app.get("/api/jobs/{job_id}/images/{index}")
     def job_image(job_id: str, index: int, download: bool = False):

@@ -34,7 +34,7 @@
         <div class="modes" role="radiogroup">
           <button data-mode="generate" class="active">Generate</button>
           <button data-mode="edit">Edit</button>
-          <button data-mode="pose">Pose</button>
+          <button data-mode="controlnet">ControlNet</button>
           <button data-mode="face">Face</button>
           <button data-mode="combine">Combine</button>
           <button data-mode="isolate">Isolate</button>
@@ -47,25 +47,38 @@
           <textarea data-role="prompt" rows="4" placeholder="Describe the image…"></textarea>
         </label>
 
-        <div class="slots" data-show="pose">
+        <div class="cn-controls" data-show="controlnet">
+          <label class="field"><span>Control type</span>
+            <select data-role="cn-type">
+              <option value="pose">Pose (skeleton)</option>
+              <option value="canny">Canny edges</option>
+              <option value="depth">Depth</option>
+              <option value="lineart">Line art</option>
+              <option value="softedge">Soft edges (HED)</option>
+              <option value="mlsd">Straight lines (MLSD)</option>
+              <option value="scribble">Scribble</option>
+              <option value="grayscale">Grayscale</option>
+            </select>
+          </label>
           <div class="field">
-            <span>Pose reference</span>
-            <label class="slot" data-slot="pose">
+            <span>Control source</span>
+            <label class="slot" data-slot="cnsource">
               <input type="file" accept="image/*" hidden>
               <img alt="" hidden>
-              <span class="slot-empty">Drop or click: a character, photo or stick figure in the pose</span>
+              <span class="slot-empty">Drop or click: a photo or drawing to take the structure from</span>
               <button type="button" class="slot-clear" hidden aria-label="Remove image">×</button>
             </label>
           </div>
+          <label class="check"><input type="checkbox" data-role="cn-is-map"> This image is already a control map</label>
+          <label class="check" data-role="cn-invert-row"><input type="checkbox" data-role="cn-invert"> Invert it (black lines on white)</label>
+          <label class="check" data-role="cn-hands-row"><input type="checkbox" checked data-role="cn-hands"> Include hands and face</label>
+          <button type="button" data-role="cn-extract">Extract control map</button>
           <div class="field">
-            <span>Subject to re-pose</span>
-            <label class="slot" data-slot="subject">
-              <input type="file" accept="image/*" hidden>
-              <img alt="" hidden>
-              <span class="slot-empty">Drop or click: the image to change</span>
-              <button type="button" class="slot-clear" hidden aria-label="Remove image">×</button>
-            </label>
+            <span>Control strength: <output data-role="cn-strength-val">auto</output></span>
+            <input type="range" min="0" max="1.5" step="0.05" value="1" data-role="cn-strength">
+            <label class="check"><input type="checkbox" checked data-role="cn-auto-strength"> Auto (1.0, or 0.8 with subject references)</label>
           </div>
+          <label class="check"><input type="checkbox" data-role="cn-inpaint"> Only repaint part of an image (inpaint)</label>
         </div>
 
         <div class="slots single" data-show="face">
@@ -92,7 +105,7 @@
           </div>
         </div>
 
-        <div class="field" data-show="generate combine">
+        <div class="field" data-show="generate combine controlnet">
           <span data-role="images-label">Reference images</span>
           <div class="thumbs" data-role="thumbs"></div>
           <label class="drop" data-role="multi-drop">
@@ -106,7 +119,7 @@
           <div class="grid">
             <label class="field wide"><span>Model variant</span><select data-role="variant"></select></label>
 
-            <label class="field" data-show="generate combine edit pose"><span>Aspect</span>
+            <label class="field" data-show="generate combine edit controlnet"><span>Aspect</span>
               <select data-role="aspect">
                 <option value="auto">Auto</option>
                 <option value="1:1">1:1</option><option value="4:3">4:3</option><option value="3:4">3:4</option>
@@ -126,7 +139,7 @@
             <label class="field"><span>CFG</span><input type="number" min="1" max="15" step="0.5" value="1" data-role="cfg"></label>
             <label class="field"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images"></label>
             <label class="field wide" data-show-cfg><span>Negative prompt</span><input type="text" data-role="negative" placeholder="used when CFG &gt; 1"></label>
-            <label class="check wide" data-show="generate edit pose combine"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
+            <label class="check wide" data-show="generate edit combine controlnet"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
             <label class="field wide"><span>Live preview while generating</span>
               <select data-role="preview">
                 <option value="fast" selected>Fast (approximate, every step)</option>
@@ -135,23 +148,13 @@
               </select>
             </label>
 
-            <label class="field wide" data-show="pose"><span>Pose reference is</span>
-              <select data-role="pose-type">
-                <option value="auto">Detect automatically</option>
-                <option value="character">A character or photo</option>
-                <option value="skeleton">A stick figure / skeleton</option>
-                <option value="sketch">A sketch or mannequin drawing</option>
-              </select>
-            </label>
-            <label class="check wide" data-show="pose"><input type="checkbox" checked data-role="keep-background"> Keep the subject image’s background</label>
-
             <label class="field wide" data-show="edit"><span>Show selection to model as</span>
               <select data-role="mask-mode">
                 <option value="annotate">Red outline on the image</option>
                 <option value="reference">Separate mask image</option>
               </select>
             </label>
-            <label class="check wide" data-show="edit face"><input type="checkbox" checked data-role="keep-outside"> Keep pixels outside the selection unchanged</label>
+            <label class="check wide" data-show="edit face controlnet" data-role="keep-outside-row"><input type="checkbox" checked data-role="keep-outside"> Keep pixels outside the selection unchanged</label>
             <label class="check wide" data-show="face"><input type="checkbox" checked data-role="keep-hair"> Keep the target’s hairstyle</label>
             <label class="check wide" data-show="face"><input type="checkbox" checked data-role="keep-expression"> Keep the target’s expression</label>
 
@@ -185,7 +188,26 @@
       </aside>
 
       <div class="stage">
-        <div class="editor" data-show="edit isolate face background">
+        <div class="cn-stage" data-show="controlnet">
+          <div class="toolbar">
+            <strong>Control map</strong>
+            <span class="inline" data-role="cn-pose-tools">
+              <button data-role="cn-add-figure" title="Add a standing figure to pose by hand">Add figure</button>
+              <button data-role="cn-mirror" title="Mirror the selected figure">Mirror</button>
+              <button data-role="cn-del-figure" title="Delete the selected figure">Delete figure</button>
+            </span>
+            <div class="spacer"></div>
+            <label class="inline small-label"><input type="checkbox" checked data-role="cn-show-source"> Show source</label>
+            <button data-role="cn-clear">Clear</button>
+          </div>
+          <div class="canvas-wrap cn-wrap">
+            <canvas data-role="cn-canvas"></canvas>
+            <p class="cn-empty" data-role="cn-empty"></p>
+          </div>
+          <p class="hint" data-role="cn-hint"></p>
+        </div>
+
+        <div class="editor" data-show="edit isolate face background controlnet">
           <div class="toolbar" data-role="toolbar">
             <div class="seg">
               <button data-tool="lasso" class="active" title="Lasso (L)">Lasso</button>
@@ -221,6 +243,7 @@
     </section>
   </template>
 
+  <script src="/static/controlnet.js"></script>
   <script src="/static/app.js"></script>
 </body>
 </html>
