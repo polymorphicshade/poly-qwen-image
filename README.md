@@ -47,11 +47,13 @@ To change the default, set `QWEN_IMAGE_VARIANT` or pass `--variant`. Offloading 
 qwen-image serve --port 7860 [--variant gguf-q4_k_m] [--preload]
 ```
 
-Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all the controls. Use **+** or Ctrl+Alt+T to open a tab, × or middle-click to close one, and double-click a tab to rename it. Tab settings are kept across reloads. In Edit and Isolate, use the lasso, box or brush tools to select a region (L/R/B/E, Ctrl+Z to undo). You can paste images with Ctrl+V. The UI uses only the HTTP API below. Interactive API docs are at `/docs`.
+Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all the controls. Use **+** or Ctrl+Alt+T to open a tab, × or middle-click to close one, and double-click a tab to rename it. Tab settings are kept across reloads. In Edit and Isolate, use the auto, lasso, box or brush tools to select a region (A/L/R/B/E, Ctrl+Z to undo). With **Auto**, click an object and AI selects it (see [Auto selection](#auto-selection)). You can paste images with Ctrl+V. The UI uses only the HTTP API below. Interactive API docs are at `/docs`.
 
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/api/generate` | `prompt`, optional `references[]` files |
+| POST | `/api/segment` | Auto selection: `image` (or `image_id`), `points` JSON `[[x, y], ...]`, optional `labels` (1 = include, 0 = exclude), `box`, `method` (`ai`/`color`), `output` (`mask`/`alpha`). Returns the mask as a PNG |
+| POST | `/api/segment/download` | fetch the auto-select weights (0.9 GB) |
 | POST | `/api/edit` | `image`, `prompt`, optional `mask` file or `selection` JSON, `mask_mode`, `keep_outside` |
 | POST | `/api/controlnet` | `prompt`, `control_type`, one of `control` (ready map) / `source` (image to extract from) / `pose` (keypoints JSON); optional `references[]`, `strength`, `invert`, inpaint `image` + `mask`/`selection` |
 | POST | `/api/controlnet/detect` | `image`, `control_type`, `options` (JSON). Returns the control map, plus editable keypoints in `info.pose` for pose |
@@ -70,7 +72,7 @@ Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all th
 
 All operation endpoints take multipart form fields. They also accept the shared options `variant`, `width`, `height`, `resolution`, `steps`, `seed`, `cfg`, `negative_prompt`, `num_images`, `transparent`, `preview`, `preview_every` and `wait`. Each call returns a job (`202`), which you poll; send `wait=true` to block until the job finishes instead. Jobs share a single GPU worker queue.
 
-A `selection` value is either `{"polygons": [[[x, y], ...], ...], "boxes": [[x0, y0, x1, y1], ...]}` or a bare list of polygons. A `mask` image counts white or opaque pixels as selected.
+A `selection` value is either `{"polygons": [[[x, y], ...], ...], "boxes": [[x0, y0, x1, y1], ...], "points": [[x, y], ...]}` or a bare list of polygons. Each entry in `points` auto-selects the object under it. A `mask` image counts white or opaque pixels as selected.
 
 ```bash
 curl -F prompt="a red fox in snow" -F wait=true http://127.0.0.1:7860/api/generate
@@ -89,6 +91,8 @@ qwen-image face -i scene.png --face hero_portrait.png [--box 300,80,420,220] [--
 qwen-image combine -i cat.png -i hat.png -p "the cat from the first image wearing the hat from the second" -o out.png
 qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight" -o knight.png
 qwen-image background -i portrait.png --background beach.png [--method composite] -o portrait_beach.png
+qwen-image segment -i photo.png --point 420,310 [--negative 400,200] [--cutout] -o mask.png
+qwen-image isolate -i photo.png --point 420,310 -o cutout.png     # --point works wherever a selection does
 ```
 
 By default each command loads the model in-process. Add `--api http://127.0.0.1:7860` to run the command on a server that already has the model loaded. Use `--json` for machine-readable output, and `qwen-image <command> -h` to list every option.
@@ -114,6 +118,16 @@ The ControlNet tab uses [alibaba-pai/Qwen-Image-2.1-Fun-Controlnet-Union](https:
 - **Subject references:** to keep a specific character's look, for example to re-pose them, add the character as a subject reference. The prompt is then framed as "a new image of the same subject as in `<image1>`", and strength defaults to 0.8 instead of 1.0 so the reference can still shape the result. Combining references with control is not something the ControlNet was trained for, but in testing it kept identity and clothing well.
 - **Inpainting:** repaints a masked region, and can be combined with a control map so the repainted part follows it too.
 - **How it works:** the control branch is a port of VideoX-Fun's VACE-style ControlNet onto the stock diffusers transformer (`qwen_image/controlnet.py`). Sixteen parallel control blocks feed skips into every second base block. On GPUs under 32 GB its weights are stored as per-row-scaled FP8 (3.8 GB instead of 7.55 GB), with no visible quality difference in A/B tests. Set `QWEN_IMAGE_CONTROLNET_STORAGE=bf16` to override.
+
+## Auto selection
+
+The **Auto** selection tool selects whatever you click: click a red square on a background and the square is selected. Qwen-Image-2.1 is a generator and cannot segment from a click, so this uses [SAM 2.1](https://huggingface.co/facebook/sam2.1-hiera-large) (Meta, Apache-2.0, 0.9 GB, downloads on first use). SAM picks regions by what they are, not only by colour. A click on a shirt selects the shirt, even if it is patterned.
+
+- **Click** selects the object under the cursor and adds it to the selection. With **Subtract** ticked, the click removes that object from the selection instead.
+- **Shift-click** adds another point to the same object, for example to grow a selection from a person's shirt to the whole person. **Alt-click** marks a point as not part of the object, which cuts that part away.
+- **By colour (magic wand)** is a model-free alternative that floods the connected region of similar colours.
+
+The image is encoded once per image (about 0.15 s on a GPU, 2 s on a CPU). After that, every click costs about 0.05 s. The model runs on the GPU when there is at least 3 GB of VRAM free, and on the CPU otherwise, so it stays usable while a generation runs. It also moves off the GPU before each generation. Set `QWEN_IMAGE_SEGMENT_DEVICE=cpu|cuda` to fix the device, or `QWEN_IMAGE_SEGMENT_MODEL` to use another SAM 2 checkpoint, such as `facebook/sam2.1-hiera-base-plus`.
 
 ## How selections reach the model
 

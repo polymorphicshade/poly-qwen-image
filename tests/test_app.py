@@ -260,3 +260,64 @@ def test_api_controlnet_detect_canny(client):
                                     files={"image": ("in.png", png(make_image()), "image/png")}))
     edges = Image.open(io.BytesIO(client.get(job["images"][0]).content))
     assert edges.size == (640, 480) and edges.getbbox() is not None
+
+
+# ---------------------------------------------------------------- auto selection (mock engine: colour stand-in for SAM)
+
+
+def test_segmenter_colour_selects_clicked_region():
+    from qwen_image.segment import Segmenter
+
+    seg = Segmenter("mock")
+    mask, info = seg.segment(make_image(), [[300, 250]])
+    assert mask.getbbox() == (200, 150, 401, 351)  # the yellow ball
+    cut, _ = seg.segment(make_image(), [[300, 250], [20, 20]], [1, 0])
+    assert cut.getbbox() == mask.getbbox()
+    with pytest.raises(ValueError):
+        seg.segment(make_image(), [[1, 1]], [0])
+    with pytest.raises(ValueError):
+        seg.segment(make_image(), [[1, 1]], [1, 1])
+
+
+def test_api_segment_and_image_id_reuse(client):
+    files = {"image": ("in.png", png(make_image()), "image/png")}
+    r = client.post("/api/segment", data={"points": "[[300, 250]]"}, files=files)
+    assert r.status_code == 200, r.text
+    mask = Image.open(io.BytesIO(r.content))
+    assert mask.mode == "L" and mask.getbbox() == (200, 150, 401, 351)
+    assert r.headers["X-Bbox"] == "200,150,401,351"
+    image_id = r.headers["X-Image-Id"]
+
+    # A second click refers to the image by id; the background point selects the background.
+    r = client.post("/api/segment", data={"image_id": image_id, "points": "[[10, 10]]", "output": "alpha"})
+    assert r.status_code == 200, r.text
+    alpha = Image.open(io.BytesIO(r.content))
+    assert alpha.mode == "RGBA" and alpha.getpixel((10, 10))[3] == 255 and alpha.getpixel((300, 250))[3] == 0
+
+    assert client.post("/api/segment", data={"image_id": "nope", "points": "[[1, 1]]"}).status_code == 404
+    assert client.post("/api/segment", data={"points": "[[1, 1]]"}).status_code == 400
+    bad = client.post("/api/segment", data={"image_id": image_id, "points": "[[1, 1]]", "labels": "[0]"})
+    assert bad.status_code == 400
+
+
+def test_api_isolate_with_auto_selected_point(client):
+    files = {"image": ("in.png", png(make_image()), "image/png")}
+    data = {"selection": json.dumps({"points": [[300, 250]]}), "method": "mask", "keep_canvas": "true", "variant": "mock", "wait": "true"}
+    job = _done(client, client.post("/api/isolate", data=data, files=files))
+    out = Image.open(io.BytesIO(client.get(job["images"][0]).content))
+    assert out.getpixel((300, 250))[3] == 255 and out.getpixel((20, 20))[3] == 0
+
+
+def test_api_models_lists_segmenter(client):
+    assert client.get("/api/models").json()["segment"]["repo"] == "mock"
+
+
+def test_cli_segment_and_point_selection(tmp_path):
+    src = tmp_path / "src.png"
+    make_image().save(src)
+    mask = tmp_path / "mask.png"
+    assert cli_main(["segment", "-i", str(src), "--point", "300,250", "--method", "color", "-o", str(mask)]) == 0
+    assert Image.open(mask).getbbox() == (200, 150, 401, 351)
+    cut = tmp_path / "cut.png"
+    assert cli_main(["isolate", "-i", str(src), "-m", "mock", "--point", "300,250", "--method", "mask", "-o", str(cut)]) == 0
+    assert Image.open(cut).size[0] < 220

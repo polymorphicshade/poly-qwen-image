@@ -8,6 +8,7 @@
     qwen-image combine -i cat.png -i hat.png -p "the cat wearing the hat"
     qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight"
     qwen-image background -i portrait.png --background beach.png
+    qwen-image segment -i photo.png --point 420,310 -o mask.png
     qwen-image models list | download VARIANT
     qwen-image serve --port 7860
 
@@ -47,6 +48,10 @@ def _box(text: str) -> list[float]:
     return _floats(text, 4)
 
 
+def _point(text: str) -> list[float]:
+    return _floats(text, 2)
+
+
 def _add_common(p: argparse.ArgumentParser, size: bool = True):
     g = p.add_argument_group("sampling")
     g.add_argument("--variant", "-m", help=f"model variant (default: {DEFAULT_VARIANT}); see 'models list'")
@@ -76,6 +81,8 @@ def _add_selection(p: argparse.ArgumentParser):
     g.add_argument("--mask", help="mask image: white/opaque = selected")
     g.add_argument("--polygon", action="append", type=_polygon, default=[], help="lasso polygon 'x,y x,y x,y ...' (repeatable)")
     g.add_argument("--box", action="append", type=_box, default=[], help="rectangle 'x0,y0,x1,y1' (repeatable)")
+    g.add_argument("--point", action="append", type=_point, default=[],
+                   help="auto-select the object at 'x,y' with AI (repeatable; each point is one object)")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -160,6 +167,17 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--keep-subject", action="store_true", help="model + selection: paste the original pixels inside the selection back")
     _add_common(p)
 
+    p = sub.add_parser("segment", help="auto-select: save a mask of the object at a point (SAM 2.1)")
+    p.add_argument("--image", "-i", required=True)
+    p.add_argument("--point", action="append", type=_point, default=[], help="'x,y' on the object (repeatable)")
+    p.add_argument("--negative", action="append", type=_point, default=[], help="'x,y' that is NOT part of the object (repeatable)")
+    p.add_argument("--box", type=_box, help="'x0,y0,x1,y1' around the object")
+    p.add_argument("--method", choices=["ai", "color"], default="ai", help="'ai' (SAM 2.1) or 'color' (magic wand)")
+    p.add_argument("--tolerance", type=int, default=32, help="color: maximum per-channel difference")
+    p.add_argument("--cutout", action="store_true", help="save the selected pixels on transparency instead of the mask")
+    p.add_argument("--output", "-o", default=None)
+    p.add_argument("--api", help="run on a server, e.g. http://127.0.0.1:7860")
+
     p = sub.add_parser("models", help="list or download model variants")
     msub = p.add_subparsers(dest="models_command", required=True)
     m = msub.add_parser("list")
@@ -243,11 +261,23 @@ def _progress_hooks(args=None):
     return hooks
 
 
-def _local_mask(args, size):
+def _local_mask(args, image, segmenter=None):
+    from PIL import ImageChops
+
     from . import selection as sel
 
     mask = _open(args.mask) if args.mask else None
-    return sel.build_mask(size, mask, args.polygon, args.box)
+    m = sel.build_mask(image.size, mask, args.polygon, args.box)
+    if args.point:
+        auto = segmenter.select_at(image, args.point)
+        m = auto if m is None else ImageChops.lighter(m, auto)
+    return m
+
+
+def _selection_json(args) -> str | None:
+    if not (args.polygon or args.box or args.point):
+        return None
+    return json.dumps({"polygons": args.polygon, "boxes": args.box, "points": args.point})
 
 
 # ---------------------------------------------------------------------- local execution
@@ -262,7 +292,7 @@ def run_local(args) -> tuple[list, dict]:
         r = engine.generate(args.prompt, [_open(p) for p in args.reference], opts, hooks)
     elif args.command == "edit":
         image = _open(args.image)
-        r = engine.edit(image, args.prompt, _local_mask(args, image.size), args.mask_mode, args.keep_outside, args.feather, opts, hooks)
+        r = engine.edit(image, args.prompt, _local_mask(args, image, engine.segmenter), args.mask_mode, args.keep_outside, args.feather, opts, hooks)
     elif args.command == "controlnet":
         inpaint = _open(args.inpaint) if args.inpaint else None
         r = engine.controlnet(
@@ -271,29 +301,29 @@ def run_local(args) -> tuple[list, dict]:
             source=_open(args.source) if args.source else None,
             pose=json.loads(Path(args.pose_json).read_text()) if args.pose_json else None,
             references=[_open(p) for p in args.reference],
-            inpaint_image=inpaint, mask=_local_mask(args, inpaint.size) if inpaint else None,
+            inpaint_image=inpaint, mask=_local_mask(args, inpaint, engine.segmenter) if inpaint else None,
             strength=args.strength, keep_outside=args.keep_outside, invert=args.invert, opts=opts, hooks=hooks,
         )
     elif args.command == "face":
         image = _open(args.image)
         r = engine.face(
-            image, _open(args.face), _local_mask(args, image.size), args.prompt, args.keep_hair,
+            image, _open(args.face), _local_mask(args, image, engine.segmenter), args.prompt, args.keep_hair,
             args.keep_expression, args.keep_outside, args.feather, opts, hooks,
         )
     elif args.command == "combine":
         r = engine.combine([_open(p) for p in args.image], args.prompt, opts, hooks)
     elif args.command == "isolate":
         image = _open(args.image)
-        mask = _local_mask(args, image.size)
+        mask = _local_mask(args, image, engine.segmenter)
         if mask is None:
-            raise SystemExit("isolate needs a selection: --mask, --polygon or --box")
+            raise SystemExit("isolate needs a selection: --mask, --polygon, --box or --point")
         r = engine.isolate(
             image, mask, args.description, args.method, args.crop, args.keep_canvas, args.clip, args.restore_pixels, opts, hooks
         )
     elif args.command == "background":
         image = _open(args.image)
         r = engine.background(
-            image, _open(args.background), _local_mask(args, image.size), args.prompt, args.method, args.keep_subject,
+            image, _open(args.background), _local_mask(args, image, engine.segmenter), args.prompt, args.method, args.keep_subject,
             opts=opts, hooks=hooks,
         )
     else:
@@ -346,14 +376,14 @@ def run_remote(args) -> tuple[list, dict]:
             attach("image", args.inpaint)
             if args.mask:
                 attach("mask", args.mask)
-            if args.polygon or args.box:
-                data["selection"] = json.dumps({"polygons": args.polygon, "boxes": args.box})
+            if _selection_json(args):
+                data["selection"] = _selection_json(args)
     elif args.command in ("edit", "isolate", "face", "background"):
         attach("image", args.image)
         if args.mask:
             attach("mask", args.mask)
-        if args.polygon or args.box:
-            data["selection"] = json.dumps({"polygons": args.polygon, "boxes": args.box})
+        if _selection_json(args):
+            data["selection"] = _selection_json(args)
         if args.command == "background":
             attach("background", args.background)
             data |= {"prompt": args.prompt, "method": args.method, "keep_subject": str(args.keep_subject).lower()}
@@ -468,6 +498,46 @@ def cmd_detect(args) -> int:
     return 0
 
 
+def cmd_segment(args) -> int:
+    from PIL import Image
+
+    points = args.point + args.negative
+    labels = [1] * len(args.point) + [0] * len(args.negative)
+    if not args.point and not args.box:
+        raise SystemExit("segment needs at least one --point or a --box")
+    if args.api:
+        import httpx
+
+        base = args.api.rstrip("/")
+        data = {"points": json.dumps(points), "labels": json.dumps(labels), "method": args.method, "tolerance": str(args.tolerance)}
+        if args.box:
+            data["box"] = json.dumps(args.box)
+        with httpx.Client(timeout=httpx.Timeout(60.0, read=None)) as client, open(args.image, "rb") as fh:
+            resp = client.post(f"{base}/api/segment", data=data, files={"image": (Path(args.image).name, fh)})
+        if resp.status_code >= 400:
+            raise SystemExit(f"Server error {resp.status_code}: {resp.text}")
+        mask = Image.open(io.BytesIO(resp.content)).convert("L")
+        score = resp.headers.get("X-Score") or None
+    else:
+        from .segment import Segmenter
+
+        mask, info = Segmenter().segment(_open(args.image), points, labels, args.box, args.method, args.tolerance,
+                                         report=lambda msg: print(msg, file=sys.stderr))
+        score = info.get("score")
+    out = Path(args.output or f"{Path(args.image).stem}_{'cutout' if args.cutout else 'mask'}.png")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if args.cutout:
+        from .selection import apply_alpha
+
+        apply_alpha(_open(args.image), mask).save(out)
+    else:
+        mask.save(out)
+    print(out)
+    if score is not None:
+        print(f"score: {score}", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(level=logging.INFO if args.verbose else logging.WARNING, format="%(levelname)s %(name)s: %(message)s")
@@ -477,6 +547,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(args)
     if args.command == "detect":
         return cmd_detect(args)
+    if args.command == "segment":
+        return cmd_segment(args)
     if args.command == "combine" and not 2 <= len(args.image) <= 10:
         raise SystemExit("combine needs between 2 and 10 --image arguments")
 

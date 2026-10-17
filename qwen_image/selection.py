@@ -56,15 +56,19 @@ def mask_from_boxes(boxes: Iterable[Sequence[float]], size: tuple[int, int]) -> 
 def parse_selection_json(text: str) -> dict:
     """Parse the ``selection`` field accepted by the API.
 
-    Accepted shapes: ``{"polygons": [[[x, y], ...], ...], "boxes": [[x0, y0, x1, y1], ...]}``, or
-    a bare list of polygons.
+    Accepted shapes: ``{"polygons": [[[x, y], ...], ...], "boxes": [[x0, y0, x1, y1], ...],
+    "points": [[x, y], ...]}``, or a bare list of polygons. Each of ``points`` auto-selects the
+    object under it (see :mod:`qwen_image.segment`).
     """
     data = json.loads(text)
     if isinstance(data, list):
         data = {"polygons": data}
     if not isinstance(data, dict):
         raise ValueError("selection must be a JSON object or a list of polygons")
-    return {"polygons": data.get("polygons") or [], "boxes": data.get("boxes") or []}
+    points = data.get("points") or []
+    if not all(isinstance(p, (list, tuple)) and len(p) == 2 for p in points):
+        raise ValueError("points must be a list of [x, y] pairs")
+    return {"polygons": data.get("polygons") or [], "boxes": data.get("boxes") or [], "points": points}
 
 
 def build_mask(

@@ -90,8 +90,11 @@ class Engine:
         self._lock = threading.RLock()
         self.control_branch = None
         from .annotators import Annotators
+        from .segment import SEGMENT_REPO, Segmenter
 
         self.annotators = Annotators()
+        # Auto selection (click-to-select). The mock variant gets a model-free stand-in.
+        self.segmenter = Segmenter("mock" if variant == "mock" else SEGMENT_REPO)
 
     # ------------------------------------------------------------------ model management
 
@@ -100,6 +103,8 @@ class Engine:
 
         hooks = hooks or Hooks()
         v = get_variant(variant or self.default_variant)
+        # Sampling needs the VRAM more than an idle auto-select model does.
+        self.segmenter.release_gpu()
         with self._lock:
             if self.variant and self.variant.name == v.name and self.pipe is not None:
                 return v

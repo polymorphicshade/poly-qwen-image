@@ -183,6 +183,9 @@ main { flex: 1; min-height: 0; }
   overflow: hidden;
 }
 .canvas-wrap canvas { display: block; max-width: 100%; max-height: 62vh; touch-action: none; cursor: crosshair; }
+.canvas-wrap canvas.auto { cursor: pointer; }
+.canvas-wrap canvas.auto.busy { cursor: progress; }
+.small-label select { width: auto; padding: 3px 6px; font-size: 12.5px; }
 
 /* results */
 .results-head { display: flex; align-items: center; gap: 10px; }

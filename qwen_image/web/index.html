@@ -210,12 +210,19 @@
         <div class="editor" data-show="edit isolate face background controlnet">
           <div class="toolbar" data-role="toolbar">
             <div class="seg">
+              <button data-tool="auto" title="Auto (A): click an object and AI selects it">Auto</button>
               <button data-tool="lasso" class="active" title="Lasso (L)">Lasso</button>
               <button data-tool="box" title="Rectangle (R)">Box</button>
               <button data-tool="brush" title="Brush (B)">Brush</button>
               <button data-tool="erase" title="Eraser (E)">Erase</button>
             </div>
-            <label class="inline small-label">Size <input type="range" min="4" max="200" value="40" data-role="brush-size"></label>
+            <label class="inline small-label" data-role="auto-method-row" hidden>
+              <select data-role="auto-method" title="How Auto finds the region">
+                <option value="ai">By object (AI)</option>
+                <option value="color">By colour (magic wand)</option>
+              </select>
+            </label>
+            <label class="inline small-label" data-role="brush-size-row">Size <input type="range" min="4" max="200" value="40" data-role="brush-size"></label>
             <label class="inline small-label"><input type="checkbox" data-role="subtract"> Subtract</label>
             <div class="spacer"></div>
             <button data-role="undo" title="Undo (Ctrl+Z)">Undo</button>

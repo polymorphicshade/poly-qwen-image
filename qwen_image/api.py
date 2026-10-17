@@ -16,7 +16,7 @@ from pathlib import Path
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from PIL import Image, ImageOps, UnidentifiedImageError
+from PIL import Image, ImageChops, ImageOps, UnidentifiedImageError
 
 from . import __version__
 from . import selection as sel
@@ -40,16 +40,24 @@ def _read_image(upload: UploadFile, field: str) -> Image.Image:
     return img if img.mode in ("RGB", "RGBA") else img.convert("RGBA" if "A" in img.getbands() or "transparency" in img.info else "RGB")
 
 
-def _selection_mask(size, mask: UploadFile | None, selection: str | None) -> Image.Image | None:
+def _selection_mask(image: Image.Image, mask: UploadFile | None, selection: str | None, segmenter=None) -> Image.Image | None:
+    """The union of an uploaded mask and a ``selection`` JSON, whose ``points`` are auto-selected."""
     mask_img = _read_image(mask, "mask") if mask is not None and mask.filename else None
-    polygons, boxes = [], []
+    polygons, boxes, points = [], [], []
     if selection:
         try:
             parsed = sel.parse_selection_json(selection)
         except ValueError as e:
             raise HTTPException(400, f"Invalid selection: {e}") from e
-        polygons, boxes = parsed["polygons"], parsed["boxes"]
-    return sel.build_mask(size, mask_img, polygons, boxes)
+        polygons, boxes, points = parsed["polygons"], parsed["boxes"], parsed["points"]
+    m = sel.build_mask(image.size, mask_img, polygons, boxes)
+    if points:
+        try:
+            auto = segmenter.select_at(image, points)
+        except ValueError as e:
+            raise HTTPException(400, f"Invalid selection: {e}") from e
+        m = auto if m is None else ImageChops.lighter(m, auto)
+    return m
 
 
 def _options(
@@ -113,6 +121,10 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
     app = FastAPI(title="poly-qwen-image", version=__version__, description="Qwen-Image-2.1 generation, editing, composition and subject isolation.")
     app.state.engine, app.state.jobs = engine, jobs
 
+    async def selection_mask(image, mask, selection):
+        # Off the event loop: auto-selected points run the segmentation model.
+        return await asyncio.to_thread(_selection_mask, image, mask, selection, engine.segmenter)
+
     async def respond(job: Job, wait: bool) -> JSONResponse:
         if wait:
             await asyncio.to_thread(job.done_event.wait)
@@ -154,8 +166,15 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
 
         rows = await asyncio.gather(*(row(v) for v in list_variants()))
         from . import controlnet as cn
+        from . import segment as seg
 
         return {
+            "segment": {
+                "repo": engine.segmenter.repo,
+                "approx_download_gb": seg.SEGMENT_GB,
+                "downloaded": await asyncio.to_thread(seg.is_downloaded, engine.segmenter.repo),
+                "loaded": engine.segmenter.loaded,
+            },
             "controlnet": {
                 "repo": cn.CONTROLNET_REPO,
                 "approx_download_gb": cn.CONTROLNET_GB,
@@ -229,7 +248,7 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
             raise HTTPException(400, "mask_mode must be 'annotate' or 'reference'")
         opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview, preview_every)
         img = _read_image(image, "image")
-        m = _selection_mask(img.size, mask, selection)
+        m = await selection_mask(img, mask, selection)
         v = _check_variant(variant)
         params = {"prompt": prompt, "mask_mode": mask_mode, "masked": not sel.is_empty(m), "keep_outside": keep_outside} | opts.__dict__
         job = jobs.submit(
@@ -237,6 +256,68 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
             lambda hooks: engine.edit(img, prompt, m, mask_mode, keep_outside, feather, opts, hooks, v),
         )
         return await respond(job, wait)
+
+    # ------------------------------------------------------------------ auto selection
+
+    @app.post("/api/segment", summary="Auto-select: the mask of the object at a clicked point")
+    async def segment(
+        image: UploadFile | None = File(None, description="Image to select in (or pass image_id)"),
+        image_id: str | None = Form(None, description="Reuse an image sent before (the X-Image-Id response header) instead of uploading it again"),
+        points: str = Form("[]", description="JSON [[x, y], ...] in image pixels"),
+        labels: str | None = Form(None, description="JSON [1, 0, ...]: 1 = part of the object, 0 = not part of it (default: all 1)"),
+        box: str | None = Form(None, description="JSON [x0, y0, x1, y1]: optional box around the object"),
+        method: str = Form("ai", description="'ai' (SAM 2.1: understands objects) or 'color' (magic wand: similar colours)"),
+        tolerance: int = Form(32, description="color: maximum per-channel difference from the clicked pixel"),
+        output: str = Form("mask", description="'mask' (white on black) or 'alpha' (white on transparent)"),
+    ):
+        from .segment import METHODS
+
+        if method not in METHODS:
+            raise HTTPException(400, f"method must be one of {', '.join(METHODS)}")
+        if output not in ("mask", "alpha"):
+            raise HTTPException(400, "output must be 'mask' or 'alpha'")
+        if image is not None and image.filename:
+            img = _read_image(image, "image")
+        elif image_id:
+            img = engine.segmenter.image(image_id)
+            if img is None:
+                raise HTTPException(404, "Unknown image_id (it may have expired); upload the image again")
+        else:
+            raise HTTPException(400, "Provide 'image' or 'image_id'")
+        try:
+            pts, lbl = json.loads(points or "[]"), json.loads(labels) if labels else None
+            bx = json.loads(box) if box else None
+        except ValueError as e:
+            raise HTTPException(400, f"points, labels and box must be JSON: {e}") from e
+        key = engine.segmenter.remember(img)
+        try:
+            mask, info = await asyncio.to_thread(engine.segmenter.segment, img, pts, lbl, bx, method, tolerance)
+        except (ValueError, TypeError, IndexError) as e:
+            raise HTTPException(400, str(e)) from e
+        if output == "alpha":
+            out = Image.new("RGBA", mask.size, (255, 255, 255, 0))
+            out.putalpha(mask)
+        else:
+            out = mask
+        buf = io.BytesIO()
+        out.save(buf, "PNG")
+        bbox = mask.getbbox()
+        headers = {
+            "X-Image-Id": key,
+            "X-Score": "" if info.get("score") is None else str(info["score"]),
+            "X-Bbox": ",".join(map(str, bbox)) if bbox else "",
+            "Access-Control-Expose-Headers": "X-Image-Id, X-Score, X-Bbox",
+        }
+        return Response(buf.getvalue(), media_type="image/png", headers=headers)
+
+    @app.post("/api/segment/download", status_code=202, summary="Download the auto-select (SAM 2.1) weights")
+    async def segment_download(wait: bool = Form(False)):
+        from . import segment as seg
+
+        repo = engine.segmenter.repo
+        if repo == "mock":
+            raise HTTPException(400, "The mock segmenter has no weights")
+        return await respond(jobs.submit("download", {"variant": "segment"}, lambda hooks: seg.download(hooks.status, repo) and None), wait)
 
     # ------------------------------------------------------------------ ControlNet
 
@@ -318,7 +399,7 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
                 raise HTTPException(400, f"Invalid pose: {e}") from e
         refs = [_read_image(r, "references") for r in references if r.filename]
         base = _read_image(image, "image") if image is not None and image.filename else None
-        region = _selection_mask(base.size, mask, selection) if base is not None else None
+        region = await selection_mask(base, mask, selection) if base is not None else None
         if base is not None and sel.is_empty(region):
             raise HTTPException(400, "Inpainting needs a mask or selection over the region to repaint")
         if cmap is None and src is None and pose_data is None and base is None:
@@ -358,7 +439,7 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview, preview_every)
         img = _read_image(image, "image")
         ref = _read_image(face, "face")
-        m = _selection_mask(img.size, mask, selection)
+        m = await selection_mask(img, mask, selection)
         v = _check_variant(variant)
         params = {
             "prompt": prompt, "keep_hair": keep_hair, "keep_expression": keep_expression,
@@ -409,7 +490,7 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
             raise HTTPException(400, "method must be 'model' or 'mask'")
         opts = _options(None, None, steps, seed, cfg, negative_prompt, num_images, resolution, True, preview, preview_every)
         img = _read_image(image, "image")
-        m = _selection_mask(img.size, mask, selection)
+        m = await selection_mask(img, mask, selection)
         if sel.is_empty(m):
             raise HTTPException(400, "isolate needs a selection: upload 'mask' or pass 'selection'")
         v = _check_variant(variant)
@@ -440,7 +521,7 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, False, preview, preview_every)
         img = _read_image(image, "image")
         bg = _read_image(background, "background")
-        m = _selection_mask(img.size, mask, selection)
+        m = await selection_mask(img, mask, selection)
         v = _check_variant(variant)
         params = {"prompt": prompt, "method": method, "keep_subject": keep_subject, "masked": not sel.is_empty(m)} | opts.__dict__
         job = jobs.submit(

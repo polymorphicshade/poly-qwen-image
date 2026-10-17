@@ -113,6 +113,8 @@ class Workspace {
     this.lastSeed = null;
     this.undoStack = [];
     this.tool = "lasso";
+    this.auto = null;         // the object being auto-selected: { points, labels, base, subtract }
+    this.segId = null;        // the server's id for this.single, so clicks don't re-upload it
 
     this.mask = document.createElement("canvas");
     this.tint = document.createElement("canvas");
@@ -132,7 +134,7 @@ class Workspace {
   settingRoles() {
     return ["prompt", "variant", "aspect", "resolution", "steps", "seed", "cfg", "num-images", "negative",
       "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "keep-hair", "keep-expression", "bg-method", "keep-subject", "cn-type", "cn-is-map", "cn-invert", "cn-hands", "cn-strength",
-      "cn-auto-strength", "cn-inpaint", "cn-show-source"];
+      "cn-auto-strength", "cn-inpaint", "cn-show-source", "auto-method"];
   }
   snapshot() {
     const s = { name: this.name, mode: this.mode, settings: {} };
@@ -180,7 +182,7 @@ class Workspace {
     // editor tools
     $$("[data-tool]", this.el).forEach(b => b.onclick = () => this.setTool(b.dataset.tool));
     this.r("undo").onclick = () => this.undo();
-    this.r("clear-sel").onclick = () => { this.pushUndo(); this.maskCtx().clearRect(0, 0, this.mask.width, this.mask.height); this.render(); };
+    this.r("clear-sel").onclick = () => { this.pushUndo(); this.auto = null; this.maskCtx().clearRect(0, 0, this.mask.width, this.mask.height); this.render(); };
     this.bindCanvas();
   }
 
@@ -239,16 +241,24 @@ class Workspace {
     this.r("prompt").placeholder = m.placeholder;
     if (m.imagesLabel) this.r("images-label").textContent = m.imagesLabel;
     this.r("run").textContent = m.run;
+    this.updateEditorHint();
+    this.updateVisibility();
+    this.renderThumbs();
+    if (this.usesEditor()) requestAnimationFrame(() => this.render());
+    if (mode === "controlnet") requestAnimationFrame(() => this.cn.sync());
+  }
+
+  updateEditorHint() {
+    if (this.tool === "auto") {
+      this.r("editor-hint").textContent = "Auto: click an object to select it. Shift-click adds more of the same object, Alt-click excludes a part of it. With Subtract ticked, a click removes an object from the selection.";
+      return;
+    }
     this.r("editor-hint").textContent = {
       isolate: "Draw around the subject with the lasso (or paint over it). A loose outline is fine — for small items, outline just that item.",
       face: "Open the image whose face should change. Optional: outline the face (and hair, if transferring it) when there are several people.",
       background: "Open the image whose subject you want to keep. Optional: outline the subject when the image has several.",
       controlnet: "Open the image to repaint and select the region to change; the rest is kept. The repainted part follows the control map too, if there is one.",
-    }[mode] || "Optional: select the area to change. Leave empty to edit the whole image.";
-    this.updateVisibility();
-    this.renderThumbs();
-    if (this.usesEditor()) requestAnimationFrame(() => this.render());
-    if (mode === "controlnet") requestAnimationFrame(() => this.cn.sync());
+    }[this.mode] || "Optional: select the area to change. Leave empty to edit the whole image.";
   }
 
   updateVisibility() {
@@ -298,6 +308,8 @@ class Workspace {
     this.single = { ...blobItem(blob, blob.name || "image.png"), bitmap };
     for (const c of [this.canvas, this.mask, this.tint]) { c.width = bitmap.width; c.height = bitmap.height; }
     this.undoStack = [];
+    this.auto = null;
+    this.segId = null;
     this.updateVisibility();
     this.render();
   }
@@ -308,6 +320,11 @@ class Workspace {
   setTool(tool) {
     this.tool = tool;
     $$("[data-tool]", this.el).forEach(b => b.classList.toggle("active", b.dataset.tool === tool));
+    this.canvas.classList.toggle("auto", tool === "auto");
+    this.r("auto-method-row").hidden = tool !== "auto";
+    this.r("brush-size-row").hidden = tool === "auto";
+    this.updateEditorHint();
+    this.render();
   }
 
   pushUndo() {
@@ -318,7 +335,73 @@ class Workspace {
 
   undo() {
     const prev = this.undoStack.pop();
-    if (prev) { this.maskCtx().putImageData(prev, 0, 0); this.render(); }
+    if (prev) { this.auto = null; this.maskCtx().putImageData(prev, 0, 0); this.render(); }
+  }
+
+  // --- auto selection: the server segments the object under the click (SAM 2.1, or magic wand)
+  async autoSelect(p, e) {
+    if (this.autoBusy) return;
+    const ctx = this.maskCtx();
+    const refine = this.auto && (e.shiftKey || e.altKey);
+    if (!refine) {
+      this.pushUndo();
+      this.auto = {
+        points: [], labels: [],
+        base: ctx.getImageData(0, 0, this.mask.width, this.mask.height),
+        // Alt-click with nothing to refine removes the clicked object instead.
+        subtract: this.r("subtract").checked || e.altKey,
+      };
+    }
+    const obj = this.auto;
+    obj.points.push([Math.round(p.x), Math.round(p.y)]);
+    obj.labels.push(refine && e.altKey ? 0 : 1);
+    const single = this.single;
+    this.autoBusy = true;
+    this.canvas.classList.add("busy");
+    const first = !(models.segment && models.segment.loaded) && this.r("auto-method").value === "ai";
+    this.setStatus(first ? "Auto-selecting… (the first time loads the model; it downloads ~0.9 GB once)" : "Auto-selecting…");
+    this.render();
+    try {
+      const bitmap = await createImageBitmap(await this.segmentRequest(obj));
+      if (this.single !== single || this.auto !== obj) return;  // image changed or selection reset meanwhile
+      ctx.putImageData(obj.base, 0, 0);
+      ctx.save();
+      ctx.globalCompositeOperation = obj.subtract ? "destination-out" : "source-over";
+      ctx.drawImage(bitmap, 0, 0, this.mask.width, this.mask.height);
+      ctx.restore();
+      this.setStatus("");
+      if (first) refreshModels();
+    } catch (err) {
+      obj.points.pop(); obj.labels.pop();
+      if (!obj.points.length && this.auto === obj) { this.auto = null; this.undoStack.pop(); }
+      this.setStatus(`Auto-select failed: ${err.message}`, true);
+    } finally {
+      this.autoBusy = false;
+      this.canvas.classList.remove("busy");
+      this.render();
+    }
+  }
+
+  async segmentRequest(obj) {
+    const send = withImage => {
+      const f = new FormData();
+      if (withImage) f.append("image", this.single.blob, this.single.name);
+      else f.append("image_id", this.segId);
+      f.append("points", JSON.stringify(obj.points));
+      f.append("labels", JSON.stringify(obj.labels));
+      f.append("method", this.r("auto-method").value);
+      f.append("output", "alpha");
+      return fetch("/api/segment", { method: "POST", body: f });
+    };
+    let res = await send(!this.segId);
+    if (res.status === 404 && this.segId) res = await send(true);  // the server forgot the image
+    if (!res.ok) {
+      let detail = null;
+      try { detail = (await res.json()).detail; } catch { /* non-JSON */ }
+      throw new Error(typeof detail === "string" ? detail : `HTTP ${res.status}`);
+    }
+    this.segId = res.headers.get("X-Image-Id") || this.segId;
+    return res.blob();
   }
 
   toImage(e) {
@@ -351,8 +434,10 @@ class Workspace {
 
     c.addEventListener("pointerdown", e => {
       if (!this.single || e.button !== 0) return;
-      c.setPointerCapture(e.pointerId);
       const p = this.toImage(e);
+      if (this.tool === "auto") { e.preventDefault(); this.autoSelect(p, e); return; }
+      c.setPointerCapture(e.pointerId);
+      this.auto = null;
       this.pushUndo();
       drawing = { tool: this.tool, points: [p], start: p, last: p, subtract: this.r("subtract").checked };
       if (drawing.tool === "brush" || drawing.tool === "erase") dab(p, p, drawing.tool === "erase");
@@ -417,6 +502,18 @@ class Workspace {
         ctx.rect(Math.min(a.x, b.x), Math.min(a.y, b.y), Math.abs(b.x - a.x), Math.abs(b.y - a.y));
       }
       ctx.stroke();
+      ctx.restore();
+    }
+
+    if (this.tool === "auto" && this.auto) {
+      const r = Math.max(4, 5 * this.scale());
+      ctx.save();
+      ctx.lineWidth = Math.max(1.5, 1.5 * this.scale());
+      ctx.strokeStyle = "#fff";
+      this.auto.points.forEach(([x, y], i) => {
+        ctx.fillStyle = this.auto.labels[i] ? "#22c55e" : "#ef4444";
+        ctx.beginPath(); ctx.arc(x, y, r, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+      });
       ctx.restore();
     }
   }
@@ -855,30 +952,39 @@ function renderModels() {
     row.querySelector('[data-a="load"]').onclick = e => runJob("/api/models/load", e.target);
     list.appendChild(row);
   }
-  const cn = models.controlnet;
-  if (cn) {
-    const row = document.createElement("div");
-    row.className = "model-row" + (cn.loaded ? " loaded" : "");
-    row.innerHTML = `
-      <div class="title">ControlNet-Union add-on</div>
-      <div class="desc"></div>
-      <div class="btns"><button data-a="download" ${cn.downloaded ? "hidden" : ""}>Download</button></div>`;
-    const badge = document.createElement("span");
-    badge.className = "badge" + (cn.downloaded ? " ok" : "");
-    badge.textContent = cn.loaded ? "loaded" : cn.downloaded ? "downloaded" : `~${cn.approx_download_gb} GB`;
-    row.querySelector(".title").appendChild(badge);
-    row.querySelector(".desc").textContent = `${cn.repo} — pose, edges, depth, line art, scribble and inpainting control for the ControlNet tab. Works with every variant; downloads on first use.`;
-    row.querySelector('[data-a="download"]').onclick = async e => {
-      e.target.disabled = true;
-      try {
-        const job = await api.post("/api/controlnet/download", new FormData());
-        const final = await api.waitJob(job.id, j => { e.target.textContent = (j.message || j.status).slice(0, 40); });
-        if (final.status === "error") alert(final.error);
-      } catch (err) { alert(err.message); }
-      await refreshModels();
-    };
-    list.appendChild(row);
+  if (models.controlnet) {
+    addonRow(list, "ControlNet-Union add-on", models.controlnet, "/api/controlnet/download",
+      "pose, edges, depth, line art, scribble and inpainting control for the ControlNet tab. Works with every variant; downloads on first use.");
   }
+  if (models.segment && models.segment.repo !== "mock") {
+    addonRow(list, "Auto-select (SAM 2.1)", models.segment, "/api/segment/download",
+      "click-to-select for the Auto selection tool. Runs alongside any variant; downloads on first use.");
+  }
+}
+
+function addonRow(list, label, info, downloadPath, desc) {
+  const row = document.createElement("div");
+  row.className = "model-row" + (info.loaded ? " loaded" : "");
+  row.innerHTML = `
+    <div class="title"></div>
+    <div class="desc"></div>
+    <div class="btns"><button data-a="download" ${info.downloaded ? "hidden" : ""}>Download</button></div>`;
+  row.querySelector(".title").textContent = label;
+  const badge = document.createElement("span");
+  badge.className = "badge" + (info.downloaded ? " ok" : "");
+  badge.textContent = info.loaded ? "loaded" : info.downloaded ? "downloaded" : `~${info.approx_download_gb} GB`;
+  row.querySelector(".title").appendChild(badge);
+  row.querySelector(".desc").textContent = `${info.repo} — ${desc}`;
+  row.querySelector('[data-a="download"]').onclick = async e => {
+    e.target.disabled = true;
+    try {
+      const job = await api.post(downloadPath, new FormData());
+      const final = await api.waitJob(job.id, j => { e.target.textContent = (j.message || j.status).slice(0, 40); });
+      if (final.status === "error") alert(final.error);
+    } catch (err) { alert(err.message); }
+    await refreshModels();
+  };
+  list.appendChild(row);
 }
 
 // ----------------------------------------------------------------------------- global events
@@ -893,7 +999,7 @@ document.addEventListener("keydown", e => {
   if (!ws || isTyping(e)) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); ws.undo(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
-  const tools = { l: "lasso", r: "box", b: "brush", e: "erase" };
+  const tools = { a: "auto", l: "lasso", r: "box", b: "brush", e: "erase" };
   if (tools[e.key.toLowerCase()] && ws.usesEditor()) ws.setTool(tools[e.key.toLowerCase()]);
 });
 
