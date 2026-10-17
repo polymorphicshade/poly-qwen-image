@@ -321,3 +321,56 @@ def test_cli_segment_and_point_selection(tmp_path):
     cut = tmp_path / "cut.png"
     assert cli_main(["isolate", "-i", str(src), "-m", "mock", "--point", "300,250", "--method", "mask", "-o", str(cut)]) == 0
     assert Image.open(cut).size[0] < 220
+
+
+# ---------------------------------------------------------------- upscale (mock: bicubic stand-in for the SR model)
+
+
+def test_upscale_target_size_and_passes():
+    from qwen_image.upscale import plan_passes, target_size
+
+    assert target_size((640, 480), scale=2.5) == (1600, 1200)
+    assert target_size((640, 480), width=1920) == (1920, 1440)
+    assert target_size((640, 480), width=1920, height=1080) == (1440, 1080)  # fitted inside
+    with pytest.raises(ValueError):
+        target_size((640, 480))
+    with pytest.raises(ValueError):
+        target_size((4000, 3000), scale=10)  # over 16384 px
+    assert plan_passes((1000, 750), (2500, 1875), 4) == [(1000, 750)]
+    assert plan_passes((1000, 750), (10000, 7500), 4) == [(1000, 750), (2500, 1875)]
+    assert plan_passes((1000, 750), (500, 375), 4) == []
+
+
+def test_engine_upscale_by_factor_keeps_alpha(engine):
+    img = make_image((200, 100)).convert("RGBA")
+    img.putalpha(Image.new("L", img.size, 128))
+    r = engine.upscale(img, scale=2.5, tile=64)
+    out = r.images[0]
+    assert out.size == (500, 250) and out.mode == "RGBA" and out.getpixel((10, 10))[3] == 128
+    assert r.info["passes"] == 1 and r.info["enhance"] is False
+    r = engine.upscale(make_image((64, 48)), scale=10, tile=64)
+    assert r.images[0].size == (640, 480) and r.info["passes"] == 2 and r.images[0].mode == "RGB"
+
+
+def test_engine_upscale_enhance_runs_qwen_first(engine):
+    r = engine.upscale(make_image((256, 192)), scale=2, enhance=True, prompt="a yellow ball", opts=Options(resolution=256))
+    assert r.images[0].size == (512, 384) and "a yellow ball" in r.prompt and r.seed >= 0
+
+
+def test_api_upscale(client):
+    files = {"image": ("in.png", png(make_image((320, 240))), "image/png")}
+    job = _done(client, client.post("/api/upscale", data={"width": "800", "wait": "true"}, files=files))
+    assert Image.open(io.BytesIO(client.get(job["images"][0]).content)).size == (800, 600)
+    assert job["params"]["size"] == [800, 600]
+    assert client.post("/api/upscale", files=files).status_code == 400  # no size
+    assert client.post("/api/upscale", data={"scale": "2", "model": "nope"}, files=files).status_code == 400
+    models = client.get("/api/upscale/models").json()
+    assert models["default"] == "realesrgan-x4plus" and len(models["models"]) == 4
+
+
+def test_cli_upscale(tmp_path):
+    src = tmp_path / "src.png"
+    make_image((100, 80)).save(src)
+    out = tmp_path / "big.png"
+    assert cli_main(["upscale", "-i", str(src), "-m", "mock", "--scale", "2.5", "--tile", "64", "-o", str(out)]) == 0
+    assert Image.open(out).size == (250, 200)

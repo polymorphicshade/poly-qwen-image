@@ -63,6 +63,11 @@ const MODES = {
     promptLabel: "Extra instructions, or what the subject is (optional)", placeholder: "the woman in the red coat / late afternoon light…",
     run: "Replace background",
   },
+  upscale: {
+    help: "Enlarge an image with an AI upscaler: by a factor (2×, 2.5×, 10×…) or to an exact width and/or height. Optionally let Qwen restore detail first.",
+    promptLabel: "Describe the image (optional, used by Enhance)", placeholder: "a portrait of an old fisherman, weathered skin…",
+    run: "Upscale",
+  },
 };
 
 const EDITOR_MODES = ["edit", "isolate", "face", "background"];
@@ -134,7 +139,8 @@ class Workspace {
   settingRoles() {
     return ["prompt", "variant", "aspect", "resolution", "steps", "seed", "cfg", "num-images", "negative",
       "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "keep-hair", "keep-expression", "bg-method", "keep-subject", "cn-type", "cn-is-map", "cn-invert", "cn-hands", "cn-strength",
-      "cn-auto-strength", "cn-inpaint", "cn-show-source", "auto-method"];
+      "cn-auto-strength", "cn-inpaint", "cn-show-source", "auto-method",
+      "up-by", "up-scale", "up-width", "up-height", "up-model", "up-enhance"];
   }
   snapshot() {
     const s = { name: this.name, mode: this.mode, settings: {} };
@@ -171,6 +177,16 @@ class Workspace {
     this.dropZone(this.r("multi-drop"), files => this.addMulti(files));
 
     this.bindSlots();
+
+    // upscale
+    $$("[data-up-scale]", this.el).forEach(b => b.onclick = () => {
+      this.r("up-scale").value = b.dataset.upScale;
+      this.updateUpscaleInfo();
+      persist();
+    });
+    for (const role of ["up-by", "up-scale", "up-width", "up-height"]) {
+      this.r(role).addEventListener("input", () => this.updateVisibility());
+    }
 
     // single image (editor)
     for (const role of ["single-input", "single-input-2"]) {
@@ -215,6 +231,17 @@ class Workspace {
     if (old) URL.revokeObjectURL(old.url);
     this.slots[name] = blob ? blobItem(blob, blob.name || `${name}.png`) : null;
     if (name === "cnsource" && this.cn) this.cn.setSource(blob);
+    if (name === "upscale") {
+      this.upSource = null;
+      if (blob) {
+        const item = this.slots[name];
+        createImageBitmap(blob).then(b => {
+          if (this.slots.upscale === item) { this.upSource = { width: b.width, height: b.height }; this.updateUpscaleInfo(); }
+          b.close();
+        }).catch(() => {});
+      }
+      this.updateUpscaleInfo();
+    }
     const slot = $(`[data-slot="${name}"]`, this.el);
     const img = slot.querySelector("img");
     img.hidden = !blob;
@@ -265,11 +292,46 @@ class Workspace {
     $$("[data-show]", this.el).forEach(el => el.hidden = !el.dataset.show.split(" ").includes(this.mode));
     $$("[data-show-cfg]", this.el).forEach(el => el.hidden = !(parseFloat(this.r("cfg").value) > 1));
     this.r("single-drop").hidden = !!this.single;
+    if (this.mode === "upscale") {
+      const bySize = this.r("up-by").value === "size";
+      this.r("up-scale-row").hidden = bySize;
+      this.r("up-size-row").hidden = !bySize;
+      this.updateUpscaleInfo();
+    }
     if (this.mode === "controlnet") {
       const inpaint = this.r("cn-inpaint").checked;
       $(".editor", this.el).hidden = !inpaint;
       this.r("keep-outside-row").hidden = !inpaint;
     }
+  }
+
+  // --- upscale: the output size, computed as the server does (aspect kept; width + height = fit inside)
+  upscaleTarget() {
+    const src = this.upSource;
+    if (!src) return null;
+    let k;
+    if (this.r("up-by").value === "size") {
+      const w = parseInt(this.r("up-width").value, 10), h = parseInt(this.r("up-height").value, 10);
+      if (!(w > 0) && !(h > 0)) return null;
+      k = Math.min(w > 0 ? w / src.width : Infinity, h > 0 ? h / src.height : Infinity);
+    } else {
+      k = parseFloat(this.r("up-scale").value);
+      if (!(k > 0)) return null;
+    }
+    return { k, width: Math.max(1, Math.round(src.width * k)), height: Math.max(1, Math.round(src.height * k)) };
+  }
+
+  updateUpscaleInfo() {
+    const info = this.r("up-info");
+    const src = this.upSource;
+    const t = this.upscaleTarget();
+    if (!src) { info.textContent = ""; return; }
+    if (!t) { info.textContent = `${src.width} × ${src.height}`; return; }
+    const mp = (t.width * t.height / 1e6).toFixed(1);
+    const tooBig = Math.max(t.width, t.height) > 16384 || t.k > 16;
+    info.textContent = `${src.width} × ${src.height} → ${t.width} × ${t.height} (${+t.k.toFixed(3)}×, ${mp} MP)` +
+      (tooBig ? " — too large: at most 16× and 16384 px per side" : "");
+    info.classList.toggle("error", tooBig);
   }
 
   // --- image inputs
@@ -534,7 +596,7 @@ class Workspace {
     const aspect = this.r("aspect").value;
     const res = parseInt(this.r("resolution").value, 10);
     form.append("resolution", res);
-    if (aspect !== "auto" && !["isolate", "face", "background"].includes(this.mode)) {
+    if (aspect !== "auto" && !["isolate", "face", "background", "upscale"].includes(this.mode)) {
       const a = ASPECTS[aspect];
       form.append("width", Math.round(res * Math.sqrt(a) / 32) * 32);
       form.append("height", Math.round(res / Math.sqrt(a) / 32) * 32);
@@ -579,6 +641,22 @@ class Workspace {
         f.append("keep_outside", this.r("keep-outside").checked);
       }
       if (!hasControl && !inpaint) throw new Error("Add a control source, draw a pose, or turn on inpainting.");
+    } else if (this.mode === "upscale") {
+      if (!this.slots.upscale) throw new Error("Add the image to upscale.");
+      f.append("image", this.slots.upscale.blob, this.slots.upscale.name);
+      if (this.r("up-by").value === "size") {
+        const w = this.r("up-width").value, h = this.r("up-height").value;
+        if (!w && !h) throw new Error("Enter a target width and/or height.");
+        add("width", w);
+        add("height", h);
+      } else {
+        const k = parseFloat(this.r("up-scale").value);
+        if (!(k > 0)) throw new Error("Enter a scale factor, e.g. 2.5.");
+        f.append("scale", k);
+      }
+      f.append("model", this.r("up-model").value);
+      f.append("enhance", this.r("up-enhance").checked);
+      f.append("prompt", prompt);
     } else {
       if (!this.single) throw new Error("Open an image first.");
       f.append("image", this.single.blob, this.single.name);
@@ -637,7 +715,8 @@ class Workspace {
     const bar = $(".bar", this.r("progress"));
     bar.style.width = "0";
     const mode = this.mode;
-    const live = this.r("preview").value !== "off" && !(mode === "isolate" && this.r("method").value === "mask");
+    const live = this.r("preview").value !== "off" && !(mode === "isolate" && this.r("method").value === "mask")
+      && !(mode === "upscale" && !this.r("up-enhance").checked);
     try {
       const created = await api.post(`/api/${mode}`, form);
       this.job = created;
@@ -736,6 +815,7 @@ class Workspace {
           <a download>Download</a>
           <button data-a="edit">Edit</button>
           <button data-a="isolate">Isolate</button>
+          <button data-a="upscale">Upscale</button>
           <button data-a="ref">Use as input</button>
           <button data-a="cmap" hidden>Control map</button>
           <button data-a="tab">New tab</button>
@@ -744,16 +824,19 @@ class Workspace {
       img.src = item.url;
       img.onclick = () => lightbox(item.url);
       const j = item.job;
-      card.querySelector(".meta").textContent = `${j.kind} · ${j.variant || ""}${j.seed >= 0 ? ` · seed ${j.seed}` : ""}`;
+      const size = j.kind === "upscale" && j.info && j.info.size ? ` · ${j.info.size[0]} × ${j.info.size[1]}` : "";
+      card.querySelector(".meta").textContent = `${j.kind}${j.variant ? ` · ${j.variant}` : ""}${size}${j.seed >= 0 ? ` · seed ${j.seed}` : ""}`;
       card.querySelector(".meta").title = j.prompt || "";
       const a = card.querySelector("a");
       a.href = item.url;
       a.download = item.name;
       card.querySelector('[data-a="edit"]').onclick = () => { this.setMode("edit"); this.setSingle(item.blob); };
       card.querySelector('[data-a="isolate"]').onclick = () => { this.setMode("isolate"); this.setSingle(item.blob); };
+      card.querySelector('[data-a="upscale"]').onclick = () => { this.setMode("upscale"); this.setSlot("upscale", item.blob); persist(); };
       card.querySelector('[data-a="ref"]').onclick = () => {
         if (this.usesEditor()) this.setSingle(item.blob);
         else if (this.mode === "controlnet") this.setSlot("cnsource", item.blob);
+        else if (this.mode === "upscale") this.setSlot("upscale", item.blob);
         else this.addMulti([new File([item.blob], item.name, { type: "image/png" })]);
       };
       const cmap = j.extras && j.extras.control;

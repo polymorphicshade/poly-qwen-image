@@ -19,6 +19,8 @@ dependencies = [
     "gguf",
     # ControlNet preprocessors (pose, HED, line art, MLSD); pulls in opencv.
     "controlnet_aux",
+    # Loads the super-resolution models used by upscale (Real-ESRGAN, RealPLKSR, ...).
+    "spandrel",
     "bitsandbytes",
     "pillow",
     "numpy",

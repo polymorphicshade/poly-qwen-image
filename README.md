@@ -11,6 +11,7 @@ A custom front end for [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Image-2.1
 | **combine** | Combines subjects from 2–10 images into one new image. |
 | **isolate** | Cuts a selected subject out of the image. The model removes the background and everything else and returns an RGBA cutout. This works on sub-elements too, such as an item a character holds or one object in the background. |
 | **background** | Replaces an image's background with the one from another image and keeps the subject. The model can repaint the scene behind the subject with matching lighting, or the subject can be cut out and pasted over the image. |
+| **upscale** | Enlarges an image with an AI upscaler, by a factor (2×, 2.5×, 10×, up to 16×) or to a width and/or height (up to 16384 px). An optional Qwen pass restores detail first. |
 
 You can choose between several model variants, including quantized ones. Each variant downloads from the Hugging Face Hub the first time it is used.
 
@@ -82,6 +83,9 @@ Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all th
 | POST | `/api/combine` | `images[]` (2–10), `prompt` |
 | POST | `/api/isolate` | `image`, `mask` file or `selection` JSON, `description`, `method`, `crop`, `clip`, `keep_canvas` |
 | POST | `/api/background` | `image` (subject), `background` files, optional `mask`/`selection`, `prompt`, `method` (`model`/`composite`), `keep_subject` |
+| POST | `/api/upscale` | `image`, one of `scale` / `width` / `height` (width and height together fit the image inside both), `model`, `enhance`, `prompt`, `tile` |
+| GET | `/api/upscale/models` | super-resolution models and their download state |
+| POST | `/api/upscale/download` | `model`: fetch a super-resolution model ahead of time |
 | GET | `/api/models` | variants with download/loaded state |
 | POST | `/api/models/load` · `/api/models/download` · `/api/models/unload` | model management |
 | GET / DELETE | `/api/jobs/{id}` | poll or cancel a job |
@@ -111,6 +115,7 @@ qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "th
 qwen-image background -i portrait.png --background beach.png [--method composite] -o portrait_beach.png
 qwen-image segment -i photo.png --point 420,310 [--negative 400,200] [--cutout] -o mask.png
 qwen-image isolate -i photo.png --point 420,310 -o cutout.png     # --point works wherever a selection does
+qwen-image upscale -i photo.png --scale 2.5 [--model nomos-webphoto] [--enhance] -o photo_big.png   # or --width 3840
 ```
 
 By default each command loads the model in-process. Add `--api http://127.0.0.1:7860` to run the command on a server that already has the model loaded. Use `--json` for machine-readable output, and `qwen-image <command> -h` to list every option.
@@ -146,6 +151,21 @@ The **Auto** selection tool selects whatever you click: click a red square on a 
 - **By colour (magic wand)** is a model-free alternative that floods the connected region of similar colours.
 
 The image is encoded once per image (about 0.15 s on a GPU, 2 s on a CPU). After that, every click costs about 0.05 s. The model runs on the GPU when there is at least 3 GB of VRAM free, and on the CPU otherwise, so it stays usable while a generation runs. It also moves off the GPU before each generation. Set `QWEN_IMAGE_SEGMENT_DEVICE=cpu|cuda` to fix the device, or `QWEN_IMAGE_SEGMENT_MODEL` to use another SAM 2 checkpoint, such as `facebook/sam2.1-hiera-base-plus`.
+
+## Upscale
+
+Qwen-Image-2.1 generates at most about 2048 px, so it cannot enlarge an image 2.5× or 10× on its own. The Upscale tab uses dedicated super-resolution models through [spandrel](https://github.com/chaiNNer-org/spandrel). Each model is a few tens of MB and downloads on first use.
+
+| Model | Best for | License |
+|---|---|---|
+| `realesrgan-x4plus` (default) | Photos, renders and illustrations; removes blur, noise and JPEG artefacts | BSD-3-Clause |
+| `nomos-webphoto` | Real-world photos, with natural textures (4× RealPLKSR) | CC-BY-4.0 |
+| `realesrgan-x4plus-anime` | Anime, cartoons and flat-coloured art | BSD-3-Clause |
+| `realesrgan-x2` | Small enlargements of clean images; changes the image less | BSD-3-Clause |
+
+- **Any size:** the models enlarge by a fixed 4× or 2×, so other factors take several passes. The first pass always runs on the original image. Each later pass first shrinks the intermediate so that the model lands on the target (10× is 4×, then 2.5×). A final Lanczos resize gives the exact pixel size. Width and height together fit the image inside both, and the aspect ratio is always kept.
+- **Tiles:** the image is processed in overlapping tiles (512 px by default), so input size is limited only by RAM. Lower `tile` if the GPU runs out of memory. Transparency is kept: alpha is resized with Lanczos.
+- **Enhance:** Qwen first repaints the image at the chosen resolution (capped at the target size). This restores real texture and removes blur and artefacts, then the upscaler takes it the rest of the way. It is generative, so small details can move or change. An optional prompt describing the image guides it.
 
 ## How selections reach the model
 

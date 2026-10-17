@@ -39,6 +39,7 @@
           <button data-mode="combine">Combine</button>
           <button data-mode="isolate">Isolate</button>
           <button data-mode="background">Background</button>
+          <button data-mode="upscale">Upscale</button>
         </div>
         <p class="mode-help" data-role="mode-help"></p>
 
@@ -105,6 +106,47 @@
           </div>
         </div>
 
+        <div class="up-controls" data-show="upscale">
+          <div class="field">
+            <span>Image to upscale</span>
+            <label class="slot" data-slot="upscale">
+              <input type="file" accept="image/*" hidden>
+              <img alt="" hidden>
+              <span class="slot-empty">Drop or click: the image to enlarge</span>
+              <button type="button" class="slot-clear" hidden aria-label="Remove image">×</button>
+            </label>
+          </div>
+          <label class="field"><span>Output size</span>
+            <select data-role="up-by">
+              <option value="scale">By a factor (2×, 2.5×, 10×…)</option>
+              <option value="size">To a width and/or height</option>
+            </select>
+          </label>
+          <div class="field" data-role="up-scale-row">
+            <span>Factor</span>
+            <span class="inline"><input type="number" min="1" max="16" step="0.1" value="2" data-role="up-scale"><span>×</span></span>
+            <span class="presets">
+              <button type="button" data-up-scale="1.5">1.5×</button><button type="button" data-up-scale="2">2×</button>
+              <button type="button" data-up-scale="2.5">2.5×</button><button type="button" data-up-scale="4">4×</button>
+              <button type="button" data-up-scale="8">8×</button><button type="button" data-up-scale="10">10×</button>
+            </span>
+          </div>
+          <div class="grid" data-role="up-size-row">
+            <label class="field"><span>Width</span><input type="number" min="1" max="16384" placeholder="auto" data-role="up-width"></label>
+            <label class="field"><span>Height</span><input type="number" min="1" max="16384" placeholder="auto" data-role="up-height"></label>
+          </div>
+          <p class="hint" data-role="up-info"></p>
+          <label class="field"><span>Upscale model</span>
+            <select data-role="up-model">
+              <option value="realesrgan-x4plus">Real-ESRGAN x4+ (general)</option>
+              <option value="nomos-webphoto">Nomos WebPhoto 4× (photos)</option>
+              <option value="realesrgan-x4plus-anime">Real-ESRGAN x4+ Anime (anime, cartoons)</option>
+              <option value="realesrgan-x2">Real-ESRGAN x2 (gentle)</option>
+            </select>
+          </label>
+          <label class="check"><input type="checkbox" data-role="up-enhance"> Enhance details with Qwen first (slower; generative, so small details can change)</label>
+        </div>
+
         <div class="field" data-show="generate combine controlnet">
           <span data-role="images-label">Reference images</span>
           <div class="thumbs" data-role="thumbs"></div>
@@ -137,7 +179,7 @@
               <span class="inline"><input type="number" placeholder="random" data-role="seed"><button type="button" class="icon-btn small" data-role="seed-reuse" title="Reuse last seed">↺</button></span>
             </label>
             <label class="field"><span>CFG</span><input type="number" min="1" max="15" step="0.5" value="1" data-role="cfg"></label>
-            <label class="field"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images"></label>
+            <label class="field" data-show="generate edit controlnet face combine isolate background"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images"></label>
             <label class="field wide" data-show-cfg><span>Negative prompt</span><input type="text" data-role="negative" placeholder="used when CFG &gt; 1"></label>
             <label class="check wide" data-show="generate edit combine controlnet"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
             <label class="field wide"><span>Live preview while generating</span>

@@ -9,6 +9,7 @@
     qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight"
     qwen-image background -i portrait.png --background beach.png
     qwen-image segment -i photo.png --point 420,310 -o mask.png
+    qwen-image upscale -i photo.png --scale 2.5   (or --width 3840)
     qwen-image models list | download VARIANT
     qwen-image serve --port 7860
 
@@ -178,6 +179,19 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--output", "-o", default=None)
     p.add_argument("--api", help="run on a server, e.g. http://127.0.0.1:7860")
 
+    p = sub.add_parser("upscale", help="upscale an image with AI, by a factor or to a size")
+    p.add_argument("--image", "-i", required=True)
+    g = p.add_argument_group("output size (a factor, or a width and/or height)")
+    g.add_argument("--scale", "-s", type=float, help="enlargement factor, e.g. 2, 2.5 or 10 (up to 16)")
+    g.add_argument("--width", type=int, help="target width (height follows the aspect ratio unless also given)")
+    g.add_argument("--height", type=int, help="target height; with --width the image is fitted inside both")
+    p.add_argument("--model", choices=["realesrgan-x4plus", "nomos-webphoto", "realesrgan-x4plus-anime", "realesrgan-x2"],
+                   help="super-resolution model (default realesrgan-x4plus)")
+    p.add_argument("--enhance", action="store_true", help="first let Qwen restore detail at --resolution (generative; slower)")
+    p.add_argument("--prompt", "-p", default="", help="--enhance: optional description of the image")
+    p.add_argument("--tile", type=int, default=512, help="tile size in input pixels (lower it if the GPU runs out of memory)")
+    _add_common(p, size=False)
+
     p = sub.add_parser("models", help="list or download model variants")
     msub = p.add_subparsers(dest="models_command", required=True)
     m = msub.add_parser("list")
@@ -326,6 +340,11 @@ def run_local(args) -> tuple[list, dict]:
             image, _open(args.background), _local_mask(args, image, engine.segmenter), args.prompt, args.method, args.keep_subject,
             opts=opts, hooks=hooks,
         )
+    elif args.command == "upscale":
+        r = engine.upscale(
+            _open(args.image), args.scale, args.width, args.height, args.model, args.enhance, args.prompt, args.tile,
+            opts, hooks,
+        )
     else:
         raise AssertionError(args.command)
     return r.images, {"seed": r.seed, "prompt": r.prompt, "variant": r.variant, "info": r.info, "_extras": r.extras}
@@ -359,6 +378,12 @@ def run_remote(args) -> tuple[list, dict]:
         data["prompt"] = args.prompt
         for p in args.image:
             attach("images", p)
+    elif args.command == "upscale":
+        attach("image", args.image)
+        data |= {"enhance": str(args.enhance).lower(), "prompt": args.prompt, "tile": str(args.tile)}
+        for key in ("scale", "model"):
+            if getattr(args, key) is not None:
+                data[key] = str(getattr(args, key))
     elif args.command == "controlnet":
         data |= {"prompt": args.prompt, "control_type": args.control_type, "invert": str(args.invert).lower(),
                  "keep_outside": str(args.keep_outside).lower()}
@@ -549,6 +574,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_detect(args)
     if args.command == "segment":
         return cmd_segment(args)
+    if args.command == "upscale" and not (args.scale or args.width or args.height):
+        raise SystemExit("upscale needs --scale, --width or --height")
     if args.command == "combine" and not 2 <= len(args.image) <= 10:
         raise SystemExit("combine needs between 2 and 10 --image arguments")
 

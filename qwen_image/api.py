@@ -530,6 +530,62 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         )
         return await respond(job, wait)
 
+    # ------------------------------------------------------------------ upscale
+
+    @app.get("/api/upscale/models", summary="Super-resolution models for /api/upscale")
+    async def upscale_models():
+        from .upscale import DEFAULT_UPSCALER, MAX_SCALE, MAX_SIDE, UPSCALERS, is_downloaded
+
+        rows = [m.to_dict() | {"downloaded": await asyncio.to_thread(is_downloaded, m)} for m in UPSCALERS.values()]
+        return {"default": DEFAULT_UPSCALER, "max_scale": MAX_SCALE, "max_side": MAX_SIDE, "models": rows}
+
+    @app.post("/api/upscale/download", status_code=202, summary="Download a super-resolution model")
+    async def upscale_download(model: str = Form(...), wait: bool = Form(False)):
+        from .upscale import download, get_upscaler
+
+        try:
+            spec = get_upscaler(model)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        return await respond(jobs.submit("download", {"variant": spec.name}, lambda hooks: download(spec, hooks.status) and None), wait)
+
+    @app.post("/api/upscale", status_code=202, summary="Upscale an image with AI, by a factor or to a size")
+    async def upscale(
+        image: UploadFile = File(..., description="Image to upscale"),
+        scale: float | None = Form(None, description="Enlargement factor, e.g. 2, 2.5 or 10 (up to 16)"),
+        width: int | None = Form(None, description="Target width in pixels (height follows the aspect ratio unless also given)"),
+        height: int | None = Form(None, description="Target height in pixels; with width, the image is fitted inside width x height"),
+        model: str | None = Form(None, description="Super-resolution model (see /api/upscale/models; default realesrgan-x4plus)"),
+        enhance: bool = Form(False, description="First let Qwen restore detail at `resolution` (generative; slower)"),
+        prompt: str = Form("", description="enhance: optional description of the image"),
+        tile: int = Form(512, description="Tile size in input pixels (lower it if the GPU runs out of memory)"),
+        steps: int | None = f["steps"], seed: int | None = f["seed"], cfg: float = f["cfg"],
+        negative_prompt: str | None = f["negative_prompt"], resolution: int = f["resolution"],
+        variant: str | None = f["variant"], wait: bool = f["wait"],
+        preview: str = f["preview"], preview_every: int | None = f["preview_every"],
+    ):
+        from .upscale import get_upscaler, target_size
+
+        opts = _options(None, None, steps, seed, cfg, negative_prompt, 1, resolution, False, preview if enhance else "off", preview_every)
+        img = _read_image(image, "image")
+        try:
+            get_upscaler(model)
+            target = target_size(img.size, scale, width, height)
+        except ValueError as e:
+            raise HTTPException(400, str(e)) from e
+        if not 64 <= tile <= 2048:
+            raise HTTPException(400, "tile must be between 64 and 2048")
+        v = _check_variant(variant)
+        params = {
+            "scale": scale, "width": width, "height": height, "size": list(target), "model": model,
+            "enhance": enhance, "prompt": prompt, "tile": tile,
+        } | ({k: val for k, val in opts.__dict__.items() if k not in ("width", "height")} if enhance else {})
+        job = jobs.submit(
+            "upscale", params,
+            lambda hooks: engine.upscale(img, scale, width, height, model, enhance, prompt, tile, opts, hooks, v),
+        )
+        return await respond(job, wait)
+
     # ------------------------------------------------------------------ jobs
 
     @app.get("/api/jobs")

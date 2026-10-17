@@ -7,6 +7,7 @@ through the job queue, and the CLI uses it directly.
 from __future__ import annotations
 
 import logging
+import math
 import random
 import threading
 import time
@@ -91,10 +92,13 @@ class Engine:
         self.control_branch = None
         from .annotators import Annotators
         from .segment import SEGMENT_REPO, Segmenter
+        from .upscale import Upscalers
 
         self.annotators = Annotators()
         # Auto selection (click-to-select). The mock variant gets a model-free stand-in.
         self.segmenter = Segmenter("mock" if variant == "mock" else SEGMENT_REPO)
+        # Super-resolution models; the mock variant gets a bicubic stand-in.
+        self.upscalers = Upscalers(mock=variant == "mock")
 
     # ------------------------------------------------------------------ model management
 
@@ -638,6 +642,56 @@ class Engine:
                 img = Image.composite(image.convert(mode), img.convert(mode), soft.resize(img.size))
             outs.append(_rgb_if_opaque(img))
         return self._result(outs, seed, full, method=method, masked=has_mask, keep_subject=keep_subject)
+
+    def upscale(
+        self,
+        image: Image.Image,
+        scale: float | None = None,
+        width: int | None = None,
+        height: int | None = None,
+        model: str | None = None,
+        enhance: bool = False,
+        prompt: str = "",
+        tile: int = 512,
+        opts: Options | None = None,
+        hooks: Hooks | None = None,
+        variant: str | None = None,
+    ) -> Result:
+        """Enlarge ``image`` by ``scale`` (e.g. 2.5 or 10), or to ``width`` and/or ``height``.
+
+        A super-resolution ``model`` (see :data:`qwen_image.upscale.UPSCALERS`) does the
+        enlarging, in tiles and in as many passes as the factor needs. With ``enhance``, Qwen
+        first repaints the image at ``opts.resolution`` (capped at the target size), restoring
+        detail and removing blur, noise and compression artefacts. That pass is generative: it
+        sharpens far more than the upscaler alone, but small details can change. ``prompt``
+        can describe the image to guide it.
+        """
+        from .upscale import get_upscaler, target_size
+
+        opts, hooks = opts or Options(), hooks or Hooks()
+        get_upscaler(model)
+        target = target_size(image.size, scale, width, height)
+        src, seed, full = image, -1, ""
+        if enhance:
+            extra = f" The image shows {prompt.strip().rstrip('.')}." if prompt.strip() else ""
+            full = (
+                "Restore and enhance this image as a high-resolution, sharp photograph of the same scene: recover fine "
+                "detail and texture, and remove blur, noise and compression artefacts. Keep the content, composition, "
+                f"colours, lighting, text and identities exactly the same.{extra}"
+            )
+            res = min(opts.resolution, round(math.sqrt(target[0] * target[1])))
+            run = Options(**{**opts.__dict__, "width": None, "height": None, "resolution": max(256, res), "transparent": False, "num_images": 1})
+            imgs, seed = self._run(full, [image.convert("RGB")], run, hooks, variant)
+            src = imgs[0].convert("RGB")
+            if "A" in image.getbands():
+                src.putalpha(image.getchannel("A").resize(src.size, Image.Resampling.LANCZOS))
+        out, info = self.upscalers.upscale(
+            src, target, model, tile, progress=hooks.progress, status=hooks.status, cancelled=hooks.cancelled,
+        )
+        if not sel.has_transparency(out):
+            out = out.convert("RGB")
+        variant_name = self.variant.name if enhance and self.variant else ""
+        return Result(images=[out], seed=seed, prompt=full, variant=variant_name, info=info | {"enhance": enhance})
 
 
 def _trim(img: Image.Image, pad: int = 4) -> Image.Image:

@@ -166,6 +166,13 @@ main { flex: 1; min-height: 0; }
 .cn-wrap canvas { cursor: default; }
 .cn-empty { position: absolute; inset: auto 16px; text-align: center; color: #bbb; font-size: 14px; margin: 0; }
 
+/* Upscale */
+.up-controls { display: flex; flex-direction: column; gap: 8px; }
+.up-controls .inline input { width: 90px; }
+.presets { display: flex; flex-wrap: wrap; gap: 4px; }
+.presets button { font-size: 12px; padding: 2px 8px; }
+.hint.error { color: var(--danger); }
+
 /* editor */
 .editor { margin-bottom: 18px; }
 .toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 8px; }
