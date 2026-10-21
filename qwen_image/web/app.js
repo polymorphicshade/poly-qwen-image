@@ -944,7 +944,7 @@ function renderTabs() {
   }
 }
 
-const STORAGE_KEY = "qwen-image-studio.tabs";
+const STORAGE_KEY = "poly-qwen-image.tabs";
 let persistTimer = null;
 function persist() {
   clearTimeout(persistTimer);

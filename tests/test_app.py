@@ -184,7 +184,7 @@ def test_api_cancel_queued_job(tmp_path):
 
 
 def test_web_ui_served(client):
-    assert "Qwen Image Studio" in client.get("/").text
+    assert "Poly Qwen Image" in client.get("/").text
     assert client.get("/static/app.js").status_code == 200
 
 
