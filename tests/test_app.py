@@ -374,3 +374,12 @@ def test_cli_upscale(tmp_path):
     out = tmp_path / "big.png"
     assert cli_main(["upscale", "-i", str(src), "-m", "mock", "--scale", "2.5", "--tile", "64", "-o", str(out)]) == 0
     assert Image.open(out).size == (250, 200)
+
+
+def test_api_documents_generation_settings(client):
+    # The web UI's settings help has an API counterpart: every sampling field is described in /docs.
+    spec = client.get("/openapi.json").json()
+    ref = spec["paths"]["/api/generate"]["post"]["requestBody"]["content"]["multipart/form-data"]["schema"]["$ref"]
+    fields = spec["components"]["schemas"][ref.rsplit("/", 1)[1]]["properties"]
+    for name in ("width", "height", "steps", "seed", "cfg", "negative_prompt", "num_images", "resolution", "variant", "preview"):
+        assert fields[name].get("description"), name

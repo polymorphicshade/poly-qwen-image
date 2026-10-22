@@ -77,6 +77,7 @@
           <div class="field">
             <span>Control strength: <output data-role="cn-strength-val">auto</output></span>
             <input type="range" min="0" max="1.5" step="0.05" value="1" data-role="cn-strength">
+            <small class="field-help">How closely the image follows the control map; lower gives the prompt and references more freedom.</small>
             <label class="check"><input type="checkbox" checked data-role="cn-auto-strength"> Auto (1.0, or 0.8 with subject references)</label>
           </div>
           <label class="check"><input type="checkbox" data-role="cn-inpaint"> Only repaint part of an image (inpaint)</label>
@@ -159,7 +160,8 @@
         <details class="advanced" open>
           <summary>Settings</summary>
           <div class="grid">
-            <label class="field wide"><span>Model variant</span><select data-role="variant"></select></label>
+            <label class="field wide"><span>Model variant</span><select data-role="variant"></select>
+              <small class="field-help">Which build of the model runs: quantized ones need less VRAM and download less, for slightly lower quality.</small></label>
 
             <label class="field" data-show="generate combine edit controlnet"><span>Aspect</span>
               <select data-role="aspect">
@@ -168,19 +170,26 @@
                 <option value="3:2">3:2</option><option value="2:3">2:3</option>
                 <option value="16:9">16:9</option><option value="9:16">9:16</option>
               </select>
+              <small class="field-help">The output’s shape; Auto matches the input image, or is square without one.</small>
             </label>
             <label class="field"><span>Resolution</span>
               <select data-role="resolution">
                 <option>768</option><option selected>1024</option><option>1328</option><option>1536</option><option>2048</option>
               </select>
+              <small class="field-help">Output size, as the side of a square with the same pixel count; larger is sharper but slower.</small>
             </label>
-            <label class="field"><span>Steps</span><input type="number" min="1" max="100" placeholder="40" data-role="steps"></label>
+            <label class="field"><span>Steps</span><input type="number" min="1" max="100" placeholder="40" data-role="steps">
+              <small class="field-help">Denoising passes (default 40); more can add detail but take longer, and Turbo always uses 8.</small></label>
             <label class="field"><span>Seed</span>
               <span class="inline"><input type="number" placeholder="random" data-role="seed"><button type="button" class="icon-btn small" data-role="seed-reuse" title="Reuse last seed">↺</button></span>
+              <small class="field-help">The starting noise: the same seed and settings give the same image; leave empty for a random one.</small>
             </label>
-            <label class="field"><span>CFG</span><input type="number" min="1" max="15" step="0.5" value="1" data-role="cfg"></label>
-            <label class="field" data-show="generate edit controlnet face combine isolate background"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images"></label>
-            <label class="field wide" data-show-cfg><span>Negative prompt</span><input type="text" data-role="negative" placeholder="used when CFG &gt; 1"></label>
+            <label class="field"><span>CFG</span><input type="number" min="1" max="15" step="0.5" value="1" data-role="cfg">
+              <small class="field-help">How strictly to follow the prompt; 1 is off, and higher (try 4) follows it closer but takes twice as long.</small></label>
+            <label class="field" data-show="generate edit controlnet face combine isolate background"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images">
+              <small class="field-help">How many variations to make in one run.</small></label>
+            <label class="field wide" data-show-cfg><span>Negative prompt</span><input type="text" data-role="negative" placeholder="used when CFG &gt; 1">
+              <small class="field-help">What to steer away from, such as “blurry, extra fingers”; only used when CFG is above 1.</small></label>
             <label class="check wide" data-show="generate edit combine controlnet"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
             <label class="field wide"><span>Live preview while generating</span>
               <select data-role="preview">
@@ -188,6 +197,7 @@
                 <option value="full">Full quality (every 5 steps, slower)</option>
                 <option value="off">Off</option>
               </select>
+              <small class="field-help">Shows the image taking shape as it generates; Full is exact but slows the run a little.</small>
             </label>
 
             <label class="field wide" data-show="edit"><span>Show selection to model as</span>
@@ -195,6 +205,7 @@
                 <option value="annotate">Red outline on the image</option>
                 <option value="reference">Separate mask image</option>
               </select>
+              <small class="field-help">How the model is told where your selection is: an outline drawn on the image, or a black-and-white mask beside it.</small>
             </label>
             <label class="check wide" data-show="edit face controlnet" data-role="keep-outside-row"><input type="checkbox" checked data-role="keep-outside"> Keep pixels outside the selection unchanged</label>
             <label class="check wide" data-show="face"><input type="checkbox" checked data-role="keep-hair"> Keep the target’s hairstyle</label>
