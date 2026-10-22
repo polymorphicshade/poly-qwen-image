@@ -192,6 +192,19 @@ main { flex: 1; min-height: 0; }
 .canvas-wrap canvas { display: block; max-width: 100%; max-height: 62vh; touch-action: none; cursor: crosshair; }
 .canvas-wrap canvas.auto { cursor: pointer; }
 .canvas-wrap canvas.auto.busy { cursor: progress; }
+.canvas-wrap canvas.brush { cursor: none; }
+/* Brush outline that follows the pointer; the dark halo keeps it visible on light images. */
+.brush-cursor {
+  position: absolute; left: 0; top: 0; transform: translate(-50%, -50%);
+  border: 1.5px solid #fff; border-radius: 50%;
+  box-shadow: 0 0 0 1px rgba(0,0,0,.6), inset 0 0 0 1px rgba(0,0,0,.6);
+  pointer-events: none;
+}
+.brush-cursor::after {
+  content: ""; position: absolute; left: 50%; top: 50%; width: 3px; height: 3px; margin: -1.5px;
+  border-radius: 50%; background: #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.6);
+}
+.brush-cursor.erase { border-style: dashed; }
 .canvas-wrap canvas[data-role="canvas"] { transform-origin: 0 0; }
 .canvas-wrap canvas.pan { cursor: grab; }
 .canvas-wrap canvas.panning { cursor: grabbing; }

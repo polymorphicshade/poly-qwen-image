@@ -264,7 +264,7 @@
                 <option value="color">By colour (magic wand)</option>
               </select>
             </label>
-            <label class="inline small-label" data-role="brush-size-row">Size <input type="range" min="4" max="200" value="40" data-role="brush-size"></label>
+            <label class="inline small-label" data-role="brush-size-row" title="Brush size ([ and ] to change)">Size <input type="range" min="4" max="200" value="40" data-role="brush-size"></label>
             <label class="inline small-label"><input type="checkbox" data-role="subtract"> Subtract</label>
             <div class="seg zoom">
               <button data-role="zoom-out" title="Zoom out (−)" aria-label="Zoom out">−</button>
@@ -278,6 +278,7 @@
           </div>
           <div class="canvas-wrap" data-role="canvas-wrap">
             <canvas data-role="canvas"></canvas>
+            <div class="brush-cursor" data-role="brush-cursor" hidden></div>
             <label class="drop big" data-role="single-drop">
               <input type="file" accept="image/*" hidden data-role="single-input-2">
               <strong>Drop an image here</strong><span>or click to choose one</span>

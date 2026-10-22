@@ -393,10 +393,45 @@ class Workspace {
     this.tool = tool;
     $$("[data-tool]", this.el).forEach(b => b.classList.toggle("active", b.dataset.tool === tool));
     this.canvas.classList.toggle("auto", tool === "auto");
+    this.canvas.classList.toggle("brush", this.isBrush());
     this.r("auto-method-row").hidden = tool !== "auto";
     this.r("brush-size-row").hidden = tool === "auto";
     this.updateEditorHint();
+    this.showBrush(this.pointer);
     this.render();
+  }
+
+  isBrush() { return this.tool === "brush" || this.tool === "erase"; }
+
+  // Outline the brush around the pointer at (clientX, clientY), so its size shows before a click.
+  // A brush is brush-size screen pixels across, the same at any image size.
+  showBrush(at) {
+    const ring = this.r("brush-cursor");
+    ring.hidden = !(at && this.single && this.isBrush());
+    if (ring.hidden) return;
+    const wrapEl = this.r("canvas-wrap");
+    const wrap = wrapEl.getBoundingClientRect();
+    ring.style.width = ring.style.height = `${this.r("brush-size").value}px`;
+    ring.style.left = `${at.x - wrap.left - wrapEl.clientLeft}px`;  // relative to the padding box
+    ring.style.top = `${at.y - wrap.top - wrapEl.clientTop}px`;
+    ring.classList.toggle("erase", this.tool === "erase");
+  }
+
+  // Change the brush size by a factor, e.g. from the [ and ] keys.
+  resizeBrush(factor) {
+    const input = this.r("brush-size");
+    const cur = parseInt(input.value, 10);
+    let v = Math.round(cur * factor);
+    if (v === cur) v += factor > 1 ? 1 : -1;
+    input.value = Math.min(+input.max, Math.max(+input.min, v));
+    this.showBrush(this.pointer || this.canvasCentre());
+    clearTimeout(this.brushTimer);
+    if (!this.pointer) this.brushTimer = setTimeout(() => this.showBrush(this.pointer), 700);
+  }
+
+  canvasCentre() {
+    const rect = this.canvas.getBoundingClientRect();
+    return { x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 };
   }
 
   pushUndo() {
@@ -537,7 +572,10 @@ class Workspace {
       ctx.strokeStyle = ctx.fillStyle = "#fff";
       ctx.lineCap = ctx.lineJoin = "round";
       ctx.lineWidth = brushRadius() * 2;
-      ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
+      ctx.beginPath();
+      // A zero-length stroke draws nothing, so a click without a drag paints a dot instead.
+      if (from.x === to.x && from.y === to.y) { ctx.arc(to.x, to.y, brushRadius(), 0, Math.PI * 2); ctx.fill(); }
+      else { ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke(); }
       ctx.restore();
     };
 
@@ -580,6 +618,13 @@ class Workspace {
       if (drawing.tool === "brush" || drawing.tool === "erase") dab(p, p, drawing.tool === "erase");
       this.render(drawing);
     });
+    // The brush outline follows the pointer; while the size slider moves, it shows in the centre.
+    c.addEventListener("pointermove", e => { this.pointer = { x: e.clientX, y: e.clientY }; this.showBrush(this.pointer); });
+    c.addEventListener("pointerleave", () => { this.pointer = null; this.showBrush(null); });
+    const size = this.r("brush-size");
+    size.addEventListener("input", () => this.showBrush(this.canvasCentre()));
+    size.addEventListener("change", () => this.showBrush(this.pointer));
+
     c.addEventListener("pointermove", e => {
       if (!drawing) return;
       const p = this.toImage(e);
@@ -1160,6 +1205,7 @@ document.addEventListener("keydown", e => {
   if (!ws.usesEditor()) return;
   const tools = { a: "auto", l: "lasso", r: "box", b: "brush", e: "erase" };
   if (tools[e.key.toLowerCase()]) ws.setTool(tools[e.key.toLowerCase()]);
+  else if ((e.key === "[" || e.key === "]") && ws.isBrush()) ws.resizeBrush(e.key === "]" ? 1.15 : 1 / 1.15);
   else if (e.key === "+" || e.key === "=") ws.zoomBy(ZOOM_STEP);
   else if (e.key === "-") ws.zoomBy(1 / ZOOM_STEP);
   else if (e.key === "0") ws.resetView();
