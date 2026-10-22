@@ -192,6 +192,10 @@ main { flex: 1; min-height: 0; }
 .canvas-wrap canvas { display: block; max-width: 100%; max-height: 62vh; touch-action: none; cursor: crosshair; }
 .canvas-wrap canvas.auto { cursor: pointer; }
 .canvas-wrap canvas.auto.busy { cursor: progress; }
+.canvas-wrap canvas[data-role="canvas"] { transform-origin: 0 0; }
+.canvas-wrap canvas.pan { cursor: grab; }
+.canvas-wrap canvas.panning { cursor: grabbing; }
+.seg.zoom [data-role="zoom-reset"] { min-width: 54px; font-variant-numeric: tabular-nums; }
 .small-label select { width: auto; padding: 3px 6px; font-size: 12.5px; }
 
 /* results */

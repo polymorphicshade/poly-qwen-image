@@ -66,7 +66,7 @@ To change the default, set `QWEN_IMAGE_VARIANT` or pass `--variant`. Offloading 
 qwen-image serve --port 7860 [--variant gguf-q4_k_m] [--preload]
 ```
 
-Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all the controls. Use **+** or Ctrl+Alt+T to open a tab, × or middle-click to close one, and double-click a tab to rename it. Tab settings are kept across reloads. In Edit and Isolate, use the auto, lasso, box or brush tools to select a region (A/L/R/B/E, Ctrl+Z to undo). With **Auto**, click an object and AI selects it (see [Auto selection](#auto-selection)). You can paste images with Ctrl+V. The UI uses only the HTTP API below. Interactive API docs are at `/docs`.
+Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all the controls. Use **+** or Ctrl+Alt+T to open a tab, × or middle-click to close one, and double-click a tab to rename it. Tab settings are kept across reloads. In Edit and Isolate, use the auto, lasso, box or brush tools to select a region (A/L/R/B/E, Ctrl+Z to undo). To refine a selection, zoom in with the mouse wheel, the −/+ buttons or the −/+ keys (0 fits the image again), and pan with the middle mouse button or Space + drag. With **Auto**, click an object and AI selects it (see [Auto selection](#auto-selection)). You can paste images with Ctrl+V. The UI uses only the HTTP API below. Interactive API docs are at `/docs`.
 
 | Method | Path | Purpose |
 |---|---|---|

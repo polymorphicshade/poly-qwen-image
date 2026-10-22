@@ -72,6 +72,10 @@ const MODES = {
 
 const EDITOR_MODES = ["edit", "isolate", "face", "background"];
 
+const ZOOM_STEP = 1.25;
+const ZOOM_MAX = 32;
+const ZOOM_HINT = "Scroll to zoom; drag with the middle button (or hold Space and drag) to pan.";
+
 const ASPECTS = { "1:1": 1, "4:3": 4 / 3, "3:4": 3 / 4, "3:2": 3 / 2, "2:3": 2 / 3, "16:9": 16 / 9, "9:16": 9 / 16 };
 
 let models = { variants: [], default: null, loaded: null };
@@ -120,6 +124,7 @@ class Workspace {
     this.tool = "lasso";
     this.auto = null;         // the object being auto-selected: { points, labels, base, subtract }
     this.segId = null;        // the server's id for this.single, so clicks don't re-upload it
+    this.view = { z: 1, x: 0, y: 0 };  // editor zoom and pan (CSS pixels), applied as a transform
 
     this.mask = document.createElement("canvas");
     this.tint = document.createElement("canvas");
@@ -199,6 +204,9 @@ class Workspace {
     $$("[data-tool]", this.el).forEach(b => b.onclick = () => this.setTool(b.dataset.tool));
     this.r("undo").onclick = () => this.undo();
     this.r("clear-sel").onclick = () => { this.pushUndo(); this.auto = null; this.maskCtx().clearRect(0, 0, this.mask.width, this.mask.height); this.render(); };
+    this.r("zoom-in").onclick = () => this.zoomBy(ZOOM_STEP);
+    this.r("zoom-out").onclick = () => this.zoomBy(1 / ZOOM_STEP);
+    this.r("zoom-reset").onclick = () => this.resetView();
     this.bindCanvas();
   }
 
@@ -277,7 +285,7 @@ class Workspace {
 
   updateEditorHint() {
     if (this.tool === "auto") {
-      this.r("editor-hint").textContent = "Auto: click an object to select it. Shift-click adds more of the same object, Alt-click excludes a part of it. With Subtract ticked, a click removes an object from the selection.";
+      this.r("editor-hint").textContent = `Auto: click an object to select it. Shift-click adds more of the same object, Alt-click excludes a part of it. With Subtract ticked, a click removes an object from the selection. ${ZOOM_HINT}`;
       return;
     }
     this.r("editor-hint").textContent = {
@@ -286,6 +294,7 @@ class Workspace {
       background: "Open the image whose subject you want to keep. Optional: outline the subject when the image has several.",
       controlnet: "Open the image to repaint and select the region to change; the rest is kept. The repainted part follows the control map too, if there is one.",
     }[this.mode] || "Optional: select the area to change. Leave empty to edit the whole image.";
+    this.r("editor-hint").textContent += ` ${ZOOM_HINT}`;
   }
 
   updateVisibility() {
@@ -372,6 +381,7 @@ class Workspace {
     this.undoStack = [];
     this.auto = null;
     this.segId = null;
+    this.resetView();
     this.updateVisibility();
     this.render();
   }
@@ -479,6 +489,43 @@ class Workspace {
     return rect.width ? this.canvas.width / rect.width : 1;
   }
 
+  // --- zoom and pan. The transform scales the canvas about its top-left corner, so toImage()
+  // and scale(), which read the on-screen rect, keep working unchanged.
+  applyView() {
+    const v = this.view;
+    this.canvas.style.transform = v.z === 1 ? "" : `translate(${v.x}px, ${v.y}px) scale(${v.z})`;
+    this.r("zoom-reset").textContent = `${Math.round(v.z * 100)}%`;
+  }
+
+  // Keep the zoomed canvas covering its unzoomed box, so the image can't be panned out of view.
+  clampView() {
+    const v = this.view;
+    const w = this.canvas.offsetWidth, h = this.canvas.offsetHeight;
+    v.x = Math.min(0, Math.max(w * (1 - v.z), v.x));
+    v.y = Math.min(0, Math.max(h * (1 - v.z), v.y));
+  }
+
+  // Zoom by a factor, keeping the image point under (clientX, clientY) in place (default: the centre).
+  zoomBy(factor, clientX, clientY) {
+    if (!this.single) return;
+    const v = this.view;
+    const rect = this.canvas.getBoundingClientRect();
+    if (clientX == null) { clientX = rect.left + rect.width / 2; clientY = rect.top + rect.height / 2; }
+    const z = Math.min(ZOOM_MAX, Math.max(1, v.z * factor));
+    const left = rect.left - v.x, top = rect.top - v.y;  // the canvas's unzoomed position
+    v.x = clientX - left - ((clientX - rect.left) / v.z) * z;
+    v.y = clientY - top - ((clientY - rect.top) / v.z) * z;
+    v.z = z;
+    this.clampView();
+    this.applyView();
+    this.render();
+  }
+
+  resetView() {
+    this.view = { z: 1, x: 0, y: 0 };
+    this.applyView();
+  }
+
   bindCanvas() {
     const c = this.canvas;
     let drawing = null;
@@ -493,6 +540,34 @@ class Workspace {
       ctx.beginPath(); ctx.moveTo(from.x, from.y); ctx.lineTo(to.x, to.y); ctx.stroke();
       ctx.restore();
     };
+
+    // Middle-drag, or Space + drag, pans the zoomed image.
+    let panning = null;
+    c.addEventListener("mousedown", e => { if (e.button === 1) e.preventDefault(); });  // no autoscroll
+    c.addEventListener("pointerdown", e => {
+      if (!this.single || !(e.button === 1 || (e.button === 0 && this.spaceDown))) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      c.setPointerCapture(e.pointerId);
+      panning = { x: e.clientX - this.view.x, y: e.clientY - this.view.y };
+      c.classList.add("panning");
+    });
+    c.addEventListener("pointermove", e => {
+      if (!panning) return;
+      this.view.x = e.clientX - panning.x;
+      this.view.y = e.clientY - panning.y;
+      this.clampView();
+      this.applyView();
+    });
+    const endPan = () => { panning = null; c.classList.remove("panning"); };
+    c.addEventListener("pointerup", endPan);
+    c.addEventListener("pointercancel", endPan);
+    this.r("canvas-wrap").addEventListener("wheel", e => {
+      if (!this.single) return;
+      e.preventDefault();
+      const dy = e.deltaY * (e.deltaMode === 1 ? 40 : e.deltaMode === 2 ? 800 : 1);  // lines / pages → pixels
+      this.zoomBy(Math.exp(-dy * 0.0015), e.clientX, e.clientY);
+    }, { passive: false });
 
     c.addEventListener("pointerdown", e => {
       if (!this.single || e.button !== 0) return;
@@ -1082,8 +1157,22 @@ document.addEventListener("keydown", e => {
   if (!ws || isTyping(e)) return;
   if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") { e.preventDefault(); ws.undo(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
+  if (!ws.usesEditor()) return;
   const tools = { a: "auto", l: "lasso", r: "box", b: "brush", e: "erase" };
-  if (tools[e.key.toLowerCase()] && ws.usesEditor()) ws.setTool(tools[e.key.toLowerCase()]);
+  if (tools[e.key.toLowerCase()]) ws.setTool(tools[e.key.toLowerCase()]);
+  else if (e.key === "+" || e.key === "=") ws.zoomBy(ZOOM_STEP);
+  else if (e.key === "-") ws.zoomBy(1 / ZOOM_STEP);
+  else if (e.key === "0") ws.resetView();
+  else if (e.code === "Space" && ws.single) {
+    e.preventDefault();  // no page scroll
+    ws.spaceDown = true;
+    ws.canvas.classList.add("pan");
+  }
+});
+
+document.addEventListener("keyup", e => {
+  if (e.code !== "Space") return;
+  for (const ws of workspaces.values()) { ws.spaceDown = false; ws.canvas.classList.remove("pan"); }
 });
 
 document.addEventListener("paste", e => {
@@ -1104,7 +1193,7 @@ document.addEventListener("paste", e => {
 
 window.addEventListener("resize", () => {
   const ws = workspaces.get(activeId);
-  if (ws) { ws.render(); ws.cn.render(); }
+  if (ws) { ws.clampView(); ws.applyView(); ws.render(); ws.cn.render(); }
 });
 
 restoreTabs();
