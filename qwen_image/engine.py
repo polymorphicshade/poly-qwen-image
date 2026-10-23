@@ -228,6 +228,9 @@ class Engine:
             raise ValueError("A prompt is required")
         full = transparent_prompt(prompt) if opts.transparent else prompt
         imgs, seed = self._run(full, references, opts, hooks, variant)
+        if references and opts.width is None and opts.height is None:
+            # Auto size: the pipeline samples on a 32 px grid; return the reference's exact size.
+            imgs = [_match_size(i, references[-1].size) for i in imgs]
         if not opts.transparent:
             imgs = [_rgb_if_opaque(i) for i in imgs]
         return self._result(imgs, seed, full, references=len(references))
@@ -355,7 +358,9 @@ class Engine:
         if pose is None and control_map is None and source is None and inpaint_image is None:
             raise ValueError("Provide a control map, a source image to extract one from, pose keypoints, or an image to inpaint")
 
-        # Output size: explicit, else the aspect of whatever defines the layout.
+        # Output size: explicit, else the aspect of whatever defines the layout, and with
+        # Auto the result is returned at that input's exact size.
+        final_size = None
         if opts.width or opts.height:
             width, height = output_dims(opts.width, opts.height, None, opts.resolution)
         else:
@@ -363,6 +368,7 @@ class Engine:
             if basis is None and pose is not None:
                 basis = Image.new("L", (int(pose.get("width") or 768), int(pose.get("height") or 1024)))
             width, height = output_dims(None, None, [basis] if basis is not None else None, opts.resolution)
+            final_size = basis.size if basis is not None else None
 
         if pose is not None:
             cmap = ann.render_pose(ann.validate_pose(pose), width, height)
@@ -401,13 +407,21 @@ class Engine:
 
         out = []
         for img in imgs:
+            if final_size is not None:
+                img = _match_size(img, final_size)
             if inpaint is not None and keep_outside:
-                img = sel.composite_inside(inpaint, img, region, feather_px)
+                if final_size is not None:
+                    # Composite against the full-resolution original, not the 32 px-grid copy.
+                    img = sel.composite_inside(inpaint_image, img, mask.resize(final_size, Image.Resampling.NEAREST), feather_px)
+                else:
+                    img = sel.composite_inside(inpaint, img, region, feather_px)
             out.append(img if opts.transparent else _rgb_if_opaque(img))
+        if cmap is not None and final_size is not None:
+            cmap = _match_size(cmap, final_size)
         extras = {"control": cmap} if cmap is not None else {}
         return self._result(
             out, seed, full, control_type=control_type, strength=strength, references=len(references),
-            inpaint=inpaint is not None, size=[width, height], extras=extras,
+            inpaint=inpaint is not None, size=list(final_size or (width, height)), extras=extras,
         )
 
     def face(
@@ -484,9 +498,10 @@ class Engine:
         if not prompt.strip():
             raise ValueError("A prompt is required")
         full = transparent_prompt(prompt) if opts.transparent else prompt
-        if opts.width is None and opts.height is None:
-            opts = Options(**{**opts.__dict__, "width": opts.resolution, "height": opts.resolution})
         imgs, seed = self._run(full, images, opts, hooks, variant)
+        if opts.width is None and opts.height is None:
+            # Auto size follows the last image, at its exact size.
+            imgs = [_match_size(i, images[-1].size) for i in imgs]
         if not opts.transparent:
             imgs = [_rgb_if_opaque(i) for i in imgs]
         return self._result(imgs, seed, full, references=len(images))
@@ -692,6 +707,10 @@ class Engine:
             out = out.convert("RGB")
         variant_name = self.variant.name if enhance and self.variant else ""
         return Result(images=[out], seed=seed, prompt=full, variant=variant_name, info=info | {"enhance": enhance})
+
+
+def _match_size(img: Image.Image, size: tuple[int, int]) -> Image.Image:
+    return img if img.size == tuple(size) else img.resize(size, Image.Resampling.LANCZOS)
 
 
 def _trim(img: Image.Image, pad: int = 4) -> Image.Image:

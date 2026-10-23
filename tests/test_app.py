@@ -93,7 +93,7 @@ def test_combine_requires_two(engine):
     with pytest.raises(ValueError):
         engine.combine([make_image()], "x")
     r = engine.combine([make_image(), make_image(color=(0, 0, 0))], "both together", opts=Options(resolution=512))
-    assert r.images[0].size == (512, 512)
+    assert r.images[0].size == (640, 480)  # Auto: the last image's exact size
 
 
 @pytest.mark.parametrize("method", ["model", "mask"])
@@ -383,3 +383,16 @@ def test_api_documents_generation_settings(client):
     fields = spec["components"]["schemas"][ref.rsplit("/", 1)[1]]["properties"]
     for name in ("width", "height", "steps", "seed", "cfg", "negative_prompt", "num_images", "resolution", "variant", "preview"):
         assert fields[name].get("description"), name
+
+
+def test_auto_size_returns_exact_input_dimensions(engine):
+    # Sizes that aren't on the pipeline's 32 px grid must still come back exactly.
+    odd = make_image((641, 479))
+    assert engine.generate("a fox", [odd], opts=Options(resolution=512)).images[0].size == (641, 479)
+    assert engine.combine([make_image(), odd], "both", opts=Options(resolution=512)).images[0].size == (641, 479)
+    assert engine.edit(odd, "make it red", opts=Options(resolution=512)).images[0].size == (641, 479)
+    mask = sel.mask_from_boxes([[100, 100, 300, 300]], odd.size)
+    r = engine.controlnet("a cat", inpaint_image=odd, mask=mask, opts=Options(resolution=512))
+    assert r.images[0].size == (641, 479) and r.info["size"] == [641, 479]
+    r = engine.controlnet("a cat", control_map=make_image((333, 517)), opts=Options(resolution=512))
+    assert r.images[0].size == (333, 517) and r.extras["control"].size == (333, 517)
