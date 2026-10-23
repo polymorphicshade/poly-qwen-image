@@ -114,7 +114,7 @@ class Workspace {
     this.el.id = `ws-${id}`;
     $("#workspaces").appendChild(this.el);
 
-    this.mode = "generate";
+    this.mode = null;         // set by setMode() below
     this.multi = [];          // reference / subject images
     this.single = null;       // { blob, url, bitmap } for edit / isolate
     this.results = [];
@@ -142,13 +142,14 @@ class Workspace {
 
   // --- persistence (settings only; images live in memory)
   settingRoles() {
-    return ["prompt", "variant", "aspect", "resolution", "steps", "seed", "cfg", "num-images", "negative",
+    return ["prompt", "variant", "resolution", "steps", "seed", "cfg", "num-images", "negative",
       "transparent", "preview", "mask-mode", "keep-outside", "method", "crop", "clip", "restore", "keep-canvas", "keep-hair", "keep-expression", "bg-method", "keep-subject", "cn-type", "cn-is-map", "cn-invert", "cn-hands", "cn-strength",
       "cn-auto-strength", "cn-inpaint", "cn-show-source", "auto-method",
       "up-by", "up-scale", "up-width", "up-height", "up-model", "up-enhance"];
   }
   snapshot() {
-    const s = { name: this.name, mode: this.mode, settings: {} };
+    this.aspects[this.mode] = this.r("aspect").value;
+    const s = { name: this.name, mode: this.mode, aspects: { ...this.aspects }, settings: {} };
     for (const role of this.settingRoles()) {
       const el = this.r(role);
       s.settings[role] = el.type === "checkbox" ? el.checked : el.value;
@@ -156,6 +157,8 @@ class Workspace {
     return s;
   }
   restore(saved) {
+    // Aspect is kept per mode, so a shape picked for Generate doesn't reshape Edit inputs.
+    this.aspects = { ...(saved.aspects || {}) };
     for (const [role, v] of Object.entries(saved.settings || {})) {
       const el = this.r(role);
       if (!el) continue;
@@ -268,7 +271,9 @@ class Workspace {
   }
 
   setMode(mode) {
+    if (this.mode) this.aspects[this.mode] = this.r("aspect").value;
     this.mode = mode;
+    this.r("aspect").value = this.aspects[mode] || "auto";
     const m = MODES[mode];
     $$(".modes button", this.el).forEach(b => b.classList.toggle("active", b.dataset.mode === mode));
     this.r("mode-help").textContent = m.help;
