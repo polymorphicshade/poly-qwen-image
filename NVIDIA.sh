@@ -7,8 +7,13 @@
 # Safe to run again: each step is skipped when it is already done. If a new driver is installed
 # the script asks you to reboot; run it again afterwards to finish and verify the setup.
 #
+# On Ubuntu the driver uses Ubuntu's prebuilt, signed kernel modules rather than DKMS, which
+# compiles the module on the server and breaks when a kernel update lands. An existing DKMS
+# driver is removed and replaced.
+#
 # Environment overrides:
-#   NVIDIA_DRIVER_PACKAGE   driver package to install instead of the newest one found (e.g. nvidia-driver-580-server-open)
+#   NVIDIA_DRIVER_BRANCH    Ubuntu: driver branch instead of the newest one found (e.g. 570-server-open)
+#   NVIDIA_DRIVER_PACKAGE   Debian: driver package instead of nvidia-open
 #   SKIP_DOCKER_INSTALL=1   do not install Docker when it is missing
 set -euo pipefail
 
@@ -31,6 +36,28 @@ case "${ID:-}" in
 esac
 
 export DEBIAN_FRONTEND=noninteractive
+
+# Installed packages of an NVIDIA driver, leaving out the container toolkit's packages.
+installed_driver_packages() {
+    dpkg-query -W -f='${db:Status-Abbrev} ${Package}\n' 2>/dev/null \
+        | awk '$1 ~ /^.[iUFHWt]/ {print $2}' \
+        | grep -E '^(nvidia-|libnvidia-|linux-modules-nvidia-|linux-objects-nvidia-|linux-signatures-nvidia-|xserver-xorg-video-nvidia)' \
+        | grep -vE '^(nvidia-container-|libnvidia-container)' || true
+}
+
+# A DKMS driver that fails to build for a new kernel leaves dpkg half-configured, and every apt
+# command fails until it is gone.
+if [ "$ID" = "ubuntu" ] && installed_driver_packages | grep -q '^nvidia-dkms-'; then
+    log "Removing the DKMS-built NVIDIA driver; a prebuilt one replaces it"
+    for module in $(dkms status 2>/dev/null | grep -oE '^nvidia/[^,: ]+' | sort -u); do
+        dkms remove "$module" --all || true
+    done
+    mapfile -t old_packages < <(installed_driver_packages)
+    apt-get purge -y -q "${old_packages[@]}" || dpkg --purge --force-depends "${old_packages[@]}"
+fi
+dpkg --configure -a || die "dpkg could not finish configuring packages; see the errors above."
+apt-get install -f -y -q
+
 apt-get update -q
 apt-get install -y -q --no-install-recommends ca-certificates curl gnupg pciutils
 
@@ -43,20 +70,38 @@ driver_major() {
 
 # ---------------------------------------------------------------------------- driver
 install_driver_ubuntu() {
-    local pkg="${NVIDIA_DRIVER_PACKAGE:-}"
-    if [ -z "$pkg" ]; then
-        # Newest headless-friendly open-kernel-module driver, falling back to the desktop flavour.
-        pkg=$(apt-cache pkgnames nvidia-driver- | grep -E '^nvidia-driver-[0-9]+-server-open$' | sort -V | tail -n1 || true)
-        [ -n "$pkg" ] || pkg=$(apt-cache pkgnames nvidia-driver- | grep -E '^nvidia-driver-[0-9]+-open$' | sort -V | tail -n1 || true)
+    # Kernel flavour (generic, lowlatency, aws, ...) and the meta package the modules follow:
+    # the HWE one when the HWE kernel is installed, so kernel updates bring matching modules.
+    local flavour meta
+    flavour=$(uname -r | cut -d- -f3-)
+    meta=$flavour
+    if dpkg-query -W -f='${db:Status-Abbrev}' "linux-image-${flavour}-hwe-${VERSION_ID}" 2>/dev/null | grep -q '^ii'; then
+        meta="${flavour}-hwe-${VERSION_ID}"
     fi
-    [ -n "$pkg" ] || die "No nvidia-driver-*-open package found in the Ubuntu archive. Set NVIDIA_DRIVER_PACKAGE."
 
-    local version
-    version=$(grep -oE '[0-9]+' <<<"$pkg" | head -n1)
-    [ "$version" -ge "$MIN_DRIVER" ] || die "Newest driver available is $pkg; $MIN_DRIVER or newer is needed. Upgrade Ubuntu or set NVIDIA_DRIVER_PACKAGE."
+    local branch="${NVIDIA_DRIVER_BRANCH:-}"
+    if [ -z "$branch" ]; then
+        # Newest open-kernel-module branch with prebuilt modules, server branches first.
+        branch=$(apt-cache pkgnames linux-modules-nvidia- \
+            | sed -nE "s/^linux-modules-nvidia-([0-9]+-server-open)-${meta}\$/\1/p" | sort -V | tail -n1)
+        [ -n "$branch" ] || branch=$(apt-cache pkgnames linux-modules-nvidia- \
+            | sed -nE "s/^linux-modules-nvidia-([0-9]+-open)-${meta}\$/\1/p" | sort -V | tail -n1)
+    fi
+    [ -n "$branch" ] || die "No prebuilt NVIDIA modules found for the '$meta' kernel. Set NVIDIA_DRIVER_BRANCH."
+    [ "${branch%%-*}" -ge "$MIN_DRIVER" ] \
+        || die "Newest driver available is $branch; $MIN_DRIVER or newer is needed. Upgrade Ubuntu or set NVIDIA_DRIVER_BRANCH."
 
-    log "Installing $pkg"
-    apt-get install -y -q "linux-headers-$(uname -r)" "$pkg"
+    # nvidia-smi ships in nvidia-utils, which is not split into open and closed packages.
+    local utils="nvidia-utils-${branch}"
+    apt-cache show "$utils" >/dev/null 2>&1 || utils="nvidia-utils-${branch%-open}"
+
+    local pkgs=("linux-modules-nvidia-${branch}-${meta}" "nvidia-headless-no-dkms-${branch}" "$utils")
+    for pkg in "${pkgs[@]}"; do
+        apt-cache show "$pkg" >/dev/null 2>&1 || die "Package $pkg is not available. Set NVIDIA_DRIVER_BRANCH to another branch."
+    done
+
+    log "Installing NVIDIA driver $branch (prebuilt modules for the '$meta' kernel)"
+    apt-get install -y -q "${pkgs[@]}"
 }
 
 install_driver_debian() {

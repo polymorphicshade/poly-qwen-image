@@ -28,7 +28,7 @@ pip install -e .[dev]
 
 ## Docker (Linux server)
 
-`docker-compose.yml` runs the app on an NVIDIA GPU behind [Caddy](https://caddyserver.com), which serves it over HTTPS with its own certificate. The host needs Docker, the NVIDIA driver (570 or newer) and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html).
+`docker-compose.yml` runs the app on an NVIDIA GPU behind [Caddy](https://caddyserver.com), which serves it over HTTPS with its own certificate. The host needs Docker, the NVIDIA driver (570 or newer) and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html). On Ubuntu or Debian, `sudo ./NVIDIA.sh` installs all three and checks that a container can see the GPU.
 
 ```bash
 cp .env.example .env          # set DOMAIN, and optionally the variant and serve flags
