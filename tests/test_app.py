@@ -396,3 +396,62 @@ def test_auto_size_returns_exact_input_dimensions(engine):
     assert r.images[0].size == (641, 479) and r.info["size"] == [641, 479]
     r = engine.controlnet("a cat", control_map=make_image((333, 517)), opts=Options(resolution=512))
     assert r.images[0].size == (333, 517) and r.extras["control"].size == (333, 517)
+
+
+# ---------------------------------------------------------------- compose
+
+
+def test_cutout_crops_selection_onto_white():
+    img = make_image()
+    mask = sel.mask_from_boxes([[200, 150, 400, 350]], img.size)
+    out = sel.cutout(img, mask, pad=0)
+    assert out.mode == "RGB" and out.size == (201, 201)  # PIL boxes are inclusive
+    assert sel.cutout(img, None).size == img.size
+
+
+def test_compose_prompt_names_every_component(engine):
+    from qwen_image.engine import Component
+
+    mask = sel.mask_from_boxes([[200, 150, 400, 350]], (640, 480))
+    parts = [Component(make_image(), mask, "the yellow ball"), Component(make_image(color=(0, 0, 0)), None, "")]
+    r = engine.compose(parts, "on a table", opts=Options(resolution=512))
+    assert r.info["components"] == 2
+    assert "image 1 is the yellow ball" in r.prompt and "image 2 is a component" in r.prompt and "on a table" in r.prompt
+    assert r.images[0].size == (576, 448)  # follows the source image's shape, not the small cutout's
+    with pytest.raises(ValueError):
+        engine.compose([])
+    with pytest.raises(ValueError):
+        engine.compose(parts * 6)
+
+
+def test_api_compose_with_selection_and_mask(client):
+    img = make_image()
+    mask = sel.mask_from_boxes([[180, 130, 420, 370]], img.size)
+    files = [
+        ("images", ("a.png", png(img), "image/png")),
+        ("images", ("b.png", png(img), "image/png")),
+        ("masks", ("m.png", png(mask), "image/png")),
+    ]
+    components = [
+        {"image": 0, "mask": 0, "label": "the ball"},
+        {"image": 1, "selection": {"boxes": [[0, 0, 100, 100]]}},
+        {"image": 1},
+    ]
+    data = {"components": json.dumps(components), "prompt": "a scene", "variant": "mock", "wait": "true"}
+    job = _done(client, client.post("/api/compose", data=data, files=files))
+    assert job["params"]["components"] == 3 and "image 1 is the ball" in job["prompt"]
+
+
+@pytest.mark.parametrize("components", ["not json", "[]", '[{"image": 5}]', '[{"image": 0, "mask": 0}]'])
+def test_api_compose_rejects_bad_components(client, components):
+    files = [("images", ("a.png", png(make_image()), "image/png"))]
+    r = client.post("/api/compose", data={"components": components, "variant": "mock"}, files=files)
+    assert r.status_code == 400
+
+
+def test_cli_compose(tmp_path):
+    src = tmp_path / "src.png"
+    make_image().save(src)
+    out = tmp_path / "c.png"
+    args = ["compose", "-c", f"{src}|box=180,130,420,370|label=the ball", "-c", str(src), "-p", "together", "-m", "mock", "-o", str(out)]
+    assert cli_main(args) == 0 and out.exists()

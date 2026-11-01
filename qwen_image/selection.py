@@ -170,3 +170,22 @@ def has_transparency(image: Image.Image, threshold: int = 250) -> bool:
     if "A" not in image.getbands():
         return False
     return image.getchannel("A").getextrema()[0] < threshold
+
+
+def cutout(image: Image.Image, mask: Image.Image | None, pad: int = 6, background=(255, 255, 255)) -> Image.Image:
+    """The selected part of ``image``, cropped to the selection and laid on a plain background.
+
+    With no selection (``None`` or empty) the whole image is returned. A plain background keeps
+    the model from treating transparency, or the rest of the source picture, as part of the part.
+    """
+    rgba = image.convert("RGBA")
+    if is_empty(mask):
+        part = rgba
+    else:
+        mask = mask_from_image(mask, rgba.size)
+        x0, y0, x1, y1 = mask.getbbox()
+        box = (max(0, x0 - pad), max(0, y0 - pad), min(rgba.width, x1 + pad), min(rgba.height, y1 + pad))
+        part = apply_alpha(rgba.crop(box), feather(mask.crop(box), 1.0))
+    plate = Image.new("RGBA", part.size, (*background, 255))
+    plate.alpha_composite(part)
+    return plate.convert("RGB")

@@ -53,6 +53,18 @@ class Options:
 
 
 @dataclass
+class Component:
+    """A part of a source image that must appear in a composed image.
+
+    ``mask`` selects the part (``None``: the whole image); ``label`` says what it is.
+    """
+
+    image: Image.Image
+    mask: Image.Image | None = None
+    label: str = ""
+
+
+@dataclass
 class Hooks:
     progress: Callable[[int, int], None] = lambda step, total: None
     status: Callable[[str], None] = lambda msg: None
@@ -505,6 +517,52 @@ class Engine:
         if not opts.transparent:
             imgs = [_rgb_if_opaque(i) for i in imgs]
         return self._result(imgs, seed, full, references=len(images))
+
+    def compose(
+        self,
+        components: list[Component],
+        prompt: str = "",
+        opts: Options | None = None,
+        hooks: Hooks | None = None,
+        variant: str | None = None,
+    ) -> Result:
+        """Make a new image that contains selected parts of several source images.
+
+        Each component is cut out of its image (the selection, or the whole image) and given to the
+        model as a numbered reference on a plain background. The prompt tells the model to put every
+        one of them in the result; ``prompt`` describes the scene around them. Components are
+        reproduced by the model, not pasted, so they match the originals closely but not pixel for pixel.
+        """
+        opts, hooks = opts or Options(), hooks or Hooks()
+        if not components:
+            raise ValueError("Compose needs at least one component")
+        if len(components) > MAX_REFERENCES:
+            raise ValueError(f"At most {MAX_REFERENCES} components are supported")
+        cutouts = [sel.cutout(c.image, c.mask) for c in components]
+        names = []
+        for n, c in enumerate(components, 1):
+            label = c.label.strip().rstrip(".")
+            names.append(f"image {n} is {label}" if label else f"image {n} is a component")
+        parts = [
+            f"The input images are separate components shown on plain white backgrounds: {'; '.join(names)}.",
+            "Create one new image that contains every one of these components, each clearly visible and "
+            "recognisable, with the same shape, colours and details as in its input image, and without the white background.",
+        ]
+        if prompt.strip():
+            parts.append(f"Scene: {prompt.strip().rstrip('.')}.")
+        else:
+            parts.append("Arrange them together naturally in one coherent scene.")
+        full = " ".join(parts)
+        if opts.transparent:
+            full = transparent_prompt(full)
+        # The cutouts are crops, so the output shape follows the last component's source image instead.
+        if opts.width is None or opts.height is None:
+            w, h = output_dims(opts.width, opts.height, [components[-1].image], opts.resolution)
+            opts = Options(**{**opts.__dict__, "width": w, "height": h})
+        imgs, seed = self._run(full, cutouts, opts, hooks, variant)
+        if not opts.transparent:
+            imgs = [_rgb_if_opaque(i) for i in imgs]
+        return self._result(imgs, seed, full, components=len(components))
 
     def isolate(
         self,

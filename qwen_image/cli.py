@@ -6,6 +6,7 @@
     qwen-image detect -i dancer.png --type pose -o pose.png --pose-json pose.json
     qwen-image face -i scene.png --face hero_portrait.png [--box 300,80,420,220]
     qwen-image combine -i cat.png -i hat.png -p "the cat wearing the hat"
+    qwen-image compose -c "cat.png|box=40,60,300,400|label=the cat" -c "hat.png|point=120,90" -p "on a sofa"
     qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight"
     qwen-image background -i portrait.png --background beach.png
     qwen-image segment -i photo.png --point 420,310 -o mask.png
@@ -51,6 +52,32 @@ def _box(text: str) -> list[float]:
 
 def _point(text: str) -> list[float]:
     return _floats(text, 2)
+
+
+def _component(text: str) -> dict:
+    """'path|key=value|...' -> {"path", "label", "mask", "polygons", "boxes", "points"}.
+
+    Keys: ``label``, ``mask`` (a mask image), ``polygon`` ('x,y x,y x,y'), ``box`` ('x0,y0,x1,y1')
+    and ``point`` ('x,y'); the last three can repeat. No selection key means the whole image.
+    """
+    path, *opts = text.split("|")
+    comp = {"path": path.strip(), "label": "", "mask": None, "polygons": [], "boxes": [], "points": []}
+    if not comp["path"]:
+        raise argparse.ArgumentTypeError("a component starts with an image path: 'image.png|box=0,0,100,100|label=the lamp'")
+    for opt in opts:
+        key, sep, value = opt.partition("=")
+        key = key.strip().lower()
+        if not sep or key not in ("label", "mask", "polygon", "box", "point"):
+            raise argparse.ArgumentTypeError(f"unknown component option '{opt}' (use label, mask, polygon, box or point)")
+        if key == "polygon":
+            comp["polygons"].append(_polygon(value))
+        elif key == "box":
+            comp["boxes"].append(_box(value))
+        elif key == "point":
+            comp["points"].append(_point(value))
+        else:
+            comp[key] = value.strip()
+    return comp
 
 
 def _add_common(p: argparse.ArgumentParser, size: bool = True):
@@ -145,6 +172,13 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("combine", help="combine subjects from 2-10 images into a new image")
     p.add_argument("--image", "-i", action="append", required=True, help="subject image (repeat 2-10 times, in prompt order)")
     p.add_argument("--prompt", "-p", required=True)
+    _add_common(p)
+
+    p = sub.add_parser("compose", help="make an image that contains selected parts of several images")
+    p.add_argument("--component", "-c", action="append", required=True, type=_component, metavar="SPEC",
+                   help="a part to include, 'image.png|box=x0,y0,x1,y1|label=the lamp' (repeat 1-10 times; keys: label, mask, "
+                        "polygon, box, point; no selection = the whole image)")
+    p.add_argument("--prompt", "-p", default="", help="optional description of the scene around the components")
     _add_common(p)
 
     p = sub.add_parser("isolate", help="cut a selected subject out onto a transparent background")
@@ -326,6 +360,17 @@ def run_local(args) -> tuple[list, dict]:
         )
     elif args.command == "combine":
         r = engine.combine([_open(p) for p in args.image], args.prompt, opts, hooks)
+    elif args.command == "compose":
+        from types import SimpleNamespace
+
+        from .engine import Component
+
+        parts = []
+        for c in args.component:
+            image = _open(c["path"])
+            sel_args = SimpleNamespace(mask=c["mask"], polygon=c["polygons"], box=c["boxes"], point=c["points"])
+            parts.append(Component(image, _local_mask(sel_args, image, engine.segmenter), c["label"]))
+        r = engine.compose(parts, args.prompt, opts, hooks)
     elif args.command == "isolate":
         image = _open(args.image)
         mask = _local_mask(args, image, engine.segmenter)
@@ -378,6 +423,23 @@ def run_remote(args) -> tuple[list, dict]:
         data["prompt"] = args.prompt
         for p in args.image:
             attach("images", p)
+    elif args.command == "compose":
+        data["prompt"] = args.prompt
+        image_index: dict[str, int] = {}
+        specs, n_masks = [], 0
+        for c in args.component:
+            if c["path"] not in image_index:
+                image_index[c["path"]] = len(image_index)
+                attach("images", c["path"])
+            spec = {"image": image_index[c["path"]], "label": c["label"]}
+            if c["mask"]:
+                attach("masks", c["mask"])
+                spec["mask"] = n_masks
+                n_masks += 1
+            if c["polygons"] or c["boxes"] or c["points"]:
+                spec["selection"] = {"polygons": c["polygons"], "boxes": c["boxes"], "points": c["points"]}
+            specs.append(spec)
+        data["components"] = json.dumps(specs)
     elif args.command == "upscale":
         attach("image", args.image)
         data |= {"enhance": str(args.enhance).lower(), "prompt": args.prompt, "tile": str(args.tile)}
@@ -578,6 +640,9 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("upscale needs --scale, --width or --height")
     if args.command == "combine" and not 2 <= len(args.image) <= 10:
         raise SystemExit("combine needs between 2 and 10 --image arguments")
+
+    if args.command == "compose" and not 1 <= len(args.component) <= 10:
+        raise SystemExit("compose needs between 1 and 10 --component arguments")
 
     _resolve_preview(args)
     images, meta = run_remote(args) if args.api else run_local(args)

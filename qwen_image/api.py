@@ -20,7 +20,7 @@ from PIL import Image, ImageChops, ImageOps, UnidentifiedImageError
 
 from . import __version__
 from . import selection as sel
-from .engine import Engine, Options
+from .engine import Component, Engine, Options
 from .jobs import TERMINAL, Job, JobManager
 from .preview import MODES as PREVIEW_MODES
 from .variants import DEFAULT_VARIANT, get_variant, list_variants
@@ -468,6 +468,50 @@ def create_app(engine: Engine | None = None, output_dir: str | Path = "outputs")
         v = _check_variant(variant)
         params = {"prompt": prompt, "images": len(imgs)} | opts.__dict__
         job = jobs.submit("combine", params, lambda hooks: engine.combine(imgs, prompt, opts, hooks, v))
+        return await respond(job, wait)
+
+    @app.post("/api/compose", status_code=202, summary="Make an image that contains selected parts of several images")
+    async def compose(
+        images: list[UploadFile] = File(..., description="The source images; 'components' refers to them by position"),
+        components: str = Form(
+            ...,
+            description='JSON list, in prompt order, of {"image": index into images, "mask": optional index into masks, '
+            '"selection": optional {"polygons", "boxes", "points"}, "label": optional text}. No mask or selection = the whole image',
+        ),
+        masks: list[UploadFile] = File([], description="Selection masks (white/opaque = selected) that components refer to"),
+        prompt: str = Form("", description="Optional description of the scene around the components"),
+        width: int | None = f["width"], height: int | None = f["height"], steps: int | None = f["steps"],
+        seed: int | None = f["seed"], cfg: float = f["cfg"], negative_prompt: str | None = f["negative_prompt"],
+        num_images: int = f["num_images"], resolution: int = f["resolution"], transparent: bool = f["transparent"],
+        variant: str | None = f["variant"], wait: bool = f["wait"],
+        preview: str = f["preview"], preview_every: int | None = f["preview_every"],
+    ):
+        opts = _options(width, height, steps, seed, cfg, negative_prompt, num_images, resolution, transparent, preview, preview_every)
+        try:
+            specs = json.loads(components)
+        except ValueError as e:
+            raise HTTPException(400, f"'components' is not valid JSON: {e}") from e
+        if not isinstance(specs, list) or not all(isinstance(c, dict) for c in specs):
+            raise HTTPException(400, "'components' must be a JSON list of objects")
+        if not 1 <= len(specs) <= 10:
+            raise HTTPException(400, "compose needs between 1 and 10 components")
+        srcs = [_read_image(i, "images") for i in images if i.filename]
+        mask_files = [m for m in masks if m.filename]
+        parts = []
+        for n, spec in enumerate(specs):
+            idx, midx = spec.get("image"), spec.get("mask")
+            if not isinstance(idx, int) or not 0 <= idx < len(srcs):
+                raise HTTPException(400, f"component {n}: 'image' must be an index into the {len(srcs)} uploaded images")
+            if midx is not None and (not isinstance(midx, int) or not 0 <= midx < len(mask_files)):
+                raise HTTPException(400, f"component {n}: 'mask' must be an index into the {len(mask_files)} uploaded masks")
+            selection = spec.get("selection")
+            m = await selection_mask(
+                srcs[idx], mask_files[midx] if midx is not None else None, json.dumps(selection) if selection else None
+            )
+            parts.append(Component(srcs[idx], None if sel.is_empty(m) else m, str(spec.get("label") or "")))
+        v = _check_variant(variant)
+        params = {"prompt": prompt, "components": len(parts), "labels": [c.label for c in parts]} | opts.__dict__
+        job = jobs.submit("compose", params, lambda hooks: engine.compose(parts, prompt, opts, hooks, v))
         return await respond(job, wait)
 
     @app.post("/api/isolate", status_code=202, summary="Isolate a selected subject onto a transparent background")

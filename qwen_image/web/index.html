@@ -37,6 +37,7 @@
           <button data-mode="controlnet">ControlNet</button>
           <button data-mode="face">Face</button>
           <button data-mode="combine">Combine</button>
+          <button data-mode="compose">Compose</button>
           <button data-mode="isolate">Isolate</button>
           <button data-mode="background">Background</button>
           <button data-mode="upscale">Upscale</button>
@@ -157,13 +158,19 @@
           </label>
         </div>
 
+        <div class="field" data-show="compose">
+          <span>Components (<span data-role="comp-count">0</span>/10)</span>
+          <div class="components" data-role="components"></div>
+          <button type="button" data-role="comp-add" title="Save the current selection as a component (no selection: the whole image)">Add selection as component</button>
+        </div>
+
         <details class="advanced" open>
           <summary>Settings</summary>
           <div class="grid">
             <label class="field wide"><span>Model variant</span><select data-role="variant"></select>
               <small class="field-help">Which build of the model runs: quantized ones need less VRAM and download less, for slightly lower quality.</small></label>
 
-            <label class="field" data-show="generate combine edit controlnet"><span>Aspect</span>
+            <label class="field" data-show="generate combine compose edit controlnet"><span>Aspect</span>
               <select data-role="aspect">
                 <option value="auto">Auto</option>
                 <option value="1:1">1:1</option><option value="4:3">4:3</option><option value="3:4">3:4</option>
@@ -186,11 +193,11 @@
             </label>
             <label class="field"><span>CFG</span><input type="number" min="1" max="15" step="0.5" value="1" data-role="cfg">
               <small class="field-help">How strictly to follow the prompt; 1 is off, and higher (try 4) follows it closer but takes twice as long.</small></label>
-            <label class="field" data-show="generate edit controlnet face combine isolate background"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images">
+            <label class="field" data-show="generate edit controlnet face combine compose isolate background"><span>Images</span><input type="number" min="1" max="8" value="1" data-role="num-images">
               <small class="field-help">How many variations to make in one run.</small></label>
             <label class="field wide" data-show-cfg><span>Negative prompt</span><input type="text" data-role="negative" placeholder="used when CFG &gt; 1">
               <small class="field-help">What to steer away from, such as “blurry, extra fingers”; only used when CFG is above 1.</small></label>
-            <label class="check wide" data-show="generate edit combine controlnet"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
+            <label class="check wide" data-show="generate edit combine compose controlnet"><input type="checkbox" data-role="transparent"> Transparent background (RGBA)</label>
             <label class="field wide"><span>Live preview while generating</span>
               <select data-role="preview">
                 <option value="fast" selected>Fast (approximate, every step)</option>
@@ -260,7 +267,7 @@
           <p class="hint" data-role="cn-hint"></p>
         </div>
 
-        <div class="editor" data-show="edit isolate face background controlnet">
+        <div class="editor" data-show="edit isolate face background controlnet compose">
           <div class="toolbar" data-role="toolbar">
             <div class="seg">
               <button data-tool="auto" title="Auto (A): click an object and AI selects it">Auto</button>
@@ -285,13 +292,14 @@
             <div class="spacer"></div>
             <button data-role="undo" title="Undo (Ctrl+Z)">Undo</button>
             <button data-role="clear-sel">Clear selection</button>
-            <label class="btn-like">Open image<input type="file" accept="image/*" hidden data-role="single-input"></label>
+            <label class="btn-like">Open image<input type="file" accept="image/*" multiple hidden data-role="single-input"></label>
           </div>
+          <div class="thumbs source-images" data-role="source-images" data-show="compose"></div>
           <div class="canvas-wrap" data-role="canvas-wrap">
             <canvas data-role="canvas"></canvas>
             <div class="brush-cursor" data-role="brush-cursor" hidden></div>
             <label class="drop big" data-role="single-drop">
-              <input type="file" accept="image/*" hidden data-role="single-input-2">
+              <input type="file" accept="image/*" multiple hidden data-role="single-input-2">
               <strong>Drop an image here</strong><span>or click to choose one</span>
             </label>
           </div>

@@ -53,6 +53,11 @@ const MODES = {
     promptLabel: "Prompt", placeholder: "The character from the first image holding the lamp from the second image, in a forest at night…",
     imagesLabel: "Subject images (2–10, in order)", run: "Combine", min: 2, max: 10,
   },
+  compose: {
+    help: "Build a new image from parts of several images. Open images, select a part of each (or none for the whole image), and add it as a component. Every component is sent to the model with the instruction to include it.",
+    promptLabel: "Scene (optional)", placeholder: "On a wooden table in warm evening light, the lamp next to the cat…",
+    run: "Compose",
+  },
   isolate: {
     help: "Outline a subject — a character, something it holds, any item — and everything else, including the background, is removed.",
     promptLabel: "What did you select? (optional, improves accuracy)", placeholder: "the red-haired girl / the sword she holds / the lamp on the table",
@@ -70,7 +75,8 @@ const MODES = {
   },
 };
 
-const EDITOR_MODES = ["edit", "isolate", "face", "background"];
+const EDITOR_MODES = ["edit", "isolate", "face", "background", "compose"];
+const MAX_COMPONENTS = 10;
 
 const ZOOM_STEP = 1.25;
 const ZOOM_MAX = 32;
@@ -116,6 +122,8 @@ class Workspace {
 
     this.mode = null;         // set by setMode() below
     this.multi = [];          // reference / subject images
+    this.sources = [];        // compose: the opened images, { blob, name, url }
+    this.components = [];     // compose: { source, mask: Blob | null, label, thumb }
     this.single = null;       // { blob, url, bitmap } for edit / isolate
     this.results = [];
     this.job = null;
@@ -199,9 +207,10 @@ class Workspace {
     // single image (editor)
     for (const role of ["single-input", "single-input-2"]) {
       const input = this.r(role);
-      input.onchange = () => { if (input.files[0]) this.setSingle(input.files[0]); input.value = ""; };
+      input.onchange = () => { this.openFiles([...input.files]); input.value = ""; };
     }
-    this.dropZone(this.r("canvas-wrap"), files => files[0] && this.setSingle(files[0]));
+    this.dropZone(this.r("canvas-wrap"), files => this.openFiles(files));
+    this.r("comp-add").onclick = () => this.addComponent();
 
     // editor tools
     $$("[data-tool]", this.el).forEach(b => b.onclick = () => this.setTool(b.dataset.tool));
@@ -281,6 +290,9 @@ class Workspace {
     this.r("prompt").placeholder = m.placeholder;
     if (m.imagesLabel) this.r("images-label").textContent = m.imagesLabel;
     this.r("run").textContent = m.run;
+    // An image already open in the editor becomes the first source image.
+    if (mode === "compose" && this.single && !this.single.source) this.single.source = this.addSource(this.single.blob);
+    this.renderSources();
     this.updateEditorHint();
     this.updateVisibility();
     this.renderThumbs();
@@ -294,6 +306,7 @@ class Workspace {
       return;
     }
     this.r("editor-hint").textContent = {
+      compose: "Open the images to take parts from (click a thumbnail to switch between them). Select a part of the current image, then press “Add selection as component”; with nothing selected, the whole image is added. The same image can supply several components.",
       isolate: "Draw around the subject with the lasso (or paint over it). A loose outline is fine — for small items, outline just that item.",
       face: "Open the image whose face should change. Optional: outline the face (and hair, if transferring it) when there are several people.",
       background: "Open the image whose subject you want to keep. Optional: outline the subject when the image has several.",
@@ -378,10 +391,29 @@ class Workspace {
     });
   }
 
+  // Open files in the editor. Compose keeps all of them as source images and shows the first.
+  async openFiles(files) {
+    if (!files.length) return;
+    if (this.mode === "compose") for (const f of files.slice(1)) this.addSource(f);
+    await this.setSingle(files[0]);
+  }
+
+  addSource(blob) {
+    let source = this.sources.find(s => s.blob === blob);
+    if (!source) {
+      source = blobItem(blob, blob.name || "image.png");
+      this.sources.push(source);
+      this.renderSources();
+    }
+    return source;
+  }
+
   async setSingle(blob) {
     const bitmap = await createImageBitmap(blob);
     if (this.single) URL.revokeObjectURL(this.single.url);
     this.single = { ...blobItem(blob, blob.name || "image.png"), bitmap };
+    if (this.mode === "compose") this.single.source = this.addSource(blob);
+    this.renderSources();
     for (const c of [this.canvas, this.mask, this.tint]) { c.width = bitmap.width; c.height = bitmap.height; }
     this.undoStack = [];
     this.auto = null;
@@ -389,6 +421,113 @@ class Workspace {
     this.resetView();
     this.updateVisibility();
     this.render();
+  }
+
+  // --- compose: source images and components
+  renderSources() {
+    const box = this.r("source-images");
+    box.innerHTML = "";
+    for (const source of this.sources) {
+      const t = document.createElement("div");
+      t.className = "thumb" + (this.single && this.single.source === source ? " current" : "");
+      t.title = "Select parts of this image";
+      t.innerHTML = `<img alt=""><button title="Remove image" aria-label="Remove image">×</button>`;
+      t.querySelector("img").src = source.url;
+      t.onclick = () => { if (!this.single || this.single.source !== source) this.setSingle(source.blob); };
+      t.querySelector("button").onclick = e => { e.stopPropagation(); this.removeSource(source); };
+      box.appendChild(t);
+    }
+  }
+
+  removeSource(source) {
+    this.components.filter(c => c.source === source).forEach(c => URL.revokeObjectURL(c.thumb));
+    this.components = this.components.filter(c => c.source !== source);
+    this.sources.splice(this.sources.indexOf(source), 1);
+    if (this.single && this.single.source === source) {
+      URL.revokeObjectURL(this.single.url);
+      this.single = null;
+      this.canvas.getContext("2d").clearRect(0, 0, this.canvas.width, this.canvas.height);
+      this.updateVisibility();
+      if (this.sources.length) this.setSingle(this.sources[0].blob);
+    }
+    URL.revokeObjectURL(source.url);
+    this.renderSources();
+    this.renderComponents();
+  }
+
+  // The selected part of the current image on white (or the whole image), for the component list.
+  componentThumb() {
+    const { width, height } = this.mask;
+    const selected = this.hasSelection();
+    let x0 = 0, y0 = 0, x1 = width, y1 = height;
+    if (selected) {
+      const data = this.maskCtx().getImageData(0, 0, width, height).data;
+      x0 = width; y0 = height; x1 = y1 = 0;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          if (data[(y * width + x) * 4 + 3] <= 127) continue;
+          x0 = Math.min(x0, x); x1 = Math.max(x1, x + 1); y0 = Math.min(y0, y); y1 = Math.max(y1, y + 1);
+        }
+      }
+    }
+    const w = x1 - x0, h = y1 - y0;
+    const k = Math.min(1, 160 / Math.max(w, h));
+    const make = () => {
+      const c = document.createElement("canvas");
+      c.width = Math.max(1, Math.round(w * k));
+      c.height = Math.max(1, Math.round(h * k));
+      return c;
+    };
+    const layer = make(), out = make();
+    const lc = layer.getContext("2d");
+    lc.drawImage(this.single.bitmap, x0, y0, w, h, 0, 0, layer.width, layer.height);
+    if (selected) {
+      lc.globalCompositeOperation = "destination-in";
+      lc.drawImage(this.mask, x0, y0, w, h, 0, 0, layer.width, layer.height);
+    }
+    const oc = out.getContext("2d");
+    oc.fillStyle = "#fff";
+    oc.fillRect(0, 0, out.width, out.height);
+    oc.drawImage(layer, 0, 0);
+    return new Promise(resolve => out.toBlob(b => resolve(URL.createObjectURL(b)), "image/png"));
+  }
+
+  async addComponent() {
+    if (!this.single) { this.setStatus("Open an image first.", true); return; }
+    if (this.components.length >= MAX_COMPONENTS) { this.setStatus(`At most ${MAX_COMPONENTS} components.`, true); return; }
+    const selected = this.hasSelection();
+    this.components.push({
+      source: this.single.source, mask: selected ? await this.maskBlob() : null, label: "", thumb: await this.componentThumb(),
+    });
+    // Start the next selection from scratch.
+    this.pushUndo();
+    this.auto = null;
+    this.maskCtx().clearRect(0, 0, this.mask.width, this.mask.height);
+    this.render();
+    this.setStatus("");
+    this.renderComponents();
+  }
+
+  renderComponents() {
+    const box = this.r("components");
+    box.innerHTML = "";
+    this.r("comp-count").textContent = this.components.length;
+    this.components.forEach((comp, i) => {
+      const row = document.createElement("div");
+      row.className = "component";
+      row.innerHTML = `<span class="idx">${i + 1}</span><img alt=""><input type="text" placeholder="What is it? (e.g. the red lamp)" aria-label="Component ${i + 1} label"><button title="Remove" aria-label="Remove">×</button>`;
+      row.querySelector("img").src = comp.thumb;
+      row.querySelector("img").onclick = () => lightbox(comp.thumb);
+      const input = row.querySelector("input");
+      input.value = comp.label;
+      input.oninput = () => { comp.label = input.value; };
+      row.querySelector("button").onclick = () => {
+        URL.revokeObjectURL(comp.thumb);
+        this.components.splice(i, 1);
+        this.renderComponents();
+      };
+      box.appendChild(row);
+    });
   }
 
   // --- selection editor
@@ -749,6 +888,20 @@ class Workspace {
       f.append("transparent", this.r("transparent").checked);
       const field = this.mode === "generate" ? "references" : "images";
       this.multi.forEach(item => f.append(field, item.blob, item.name));
+    } else if (this.mode === "compose") {
+      if (!this.components.length) throw new Error("Add at least one component: select a part of an image, then press “Add selection as component”.");
+      if (prompt) f.append("prompt", prompt);
+      f.append("transparent", this.r("transparent").checked);
+      const used = [...new Set(this.components.map(c => c.source))];
+      used.forEach(s => f.append("images", s.blob, s.name));
+      const specs = [];
+      let masks = 0;
+      for (const c of this.components) {
+        const spec = { image: used.indexOf(c.source), label: c.label.trim() };
+        if (c.mask) { f.append("masks", c.mask, "mask.png"); spec.mask = masks++; }
+        specs.push(spec);
+      }
+      f.append("components", JSON.stringify(specs));
     } else if (this.mode === "controlnet") {
       if (!prompt) throw new Error("Describe the image to create.");
       f.append("prompt", prompt);
@@ -1002,7 +1155,8 @@ class Workspace {
   destroy() {
     if (this.job) this.cancel();
     const slots = Object.values(this.slots || {});
-    for (const item of [...this.multi, ...this.results, ...slots, this.single].filter(Boolean)) URL.revokeObjectURL(item.url);
+    const thumbs = this.components.map(c => ({ url: c.thumb }));
+    for (const item of [...this.multi, ...this.sources, ...thumbs, ...this.results, ...slots, this.single].filter(Boolean)) URL.revokeObjectURL(item.url);
     this.el.remove();
   }
 }
@@ -1236,7 +1390,7 @@ document.addEventListener("paste", e => {
   const slots = ws.modeSlots();
   const empty = slots.find(n => !ws.slots[n]);
   if (empty) ws.setSlot(empty, files[0]);
-  else if (ws.usesEditor()) ws.setSingle(files[0]);
+  else if (ws.usesEditor()) ws.openFiles(files);
   else if (ws.mode === "controlnet") ws.addMulti(files);
   else if (slots.length) ws.setSlot(slots[slots.length - 1], files[0]);
   else ws.addMulti(files);

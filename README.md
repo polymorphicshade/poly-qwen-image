@@ -9,6 +9,7 @@ A custom front end for [Qwen-Image-2.1](https://github.com/QwenLM/Qwen-Image-2.1
 | **controlnet** | Generates guided by a control signal: a pose skeleton, canny edges, depth, line art, soft edges, straight lines, scribble or grayscale. The signal can be extracted from any image or drawn by hand; the pose skeleton is editable. Optional subject references keep a specific character's look, so a character can be re-posed. Optional inpainting repaints only a masked region. |
 | **face** | Gives the subject of an image the face from a reference image, to keep characters consistent across images. Hair and expression are kept by default; either can be transferred too. An optional selection picks one face among several. |
 | **combine** | Combines subjects from 2–10 images into one new image. |
+| **compose** | Makes a new image that contains selected parts of several images. Select a part of each image (or take a whole image), and the model is told to include every one of them. The same image can supply several parts. |
 | **isolate** | Cuts a selected subject out of the image. The model removes the background and everything else and returns an RGBA cutout. This works on sub-elements too, such as an item a character holds or one object in the background. |
 | **background** | Replaces an image's background with the one from another image and keeps the subject. The model can repaint the scene behind the subject with matching lighting, or the subject can be cut out and pasted over the image. |
 | **upscale** | Enlarges an image with an AI upscaler, by a factor (2×, 2.5×, 10×, up to 16×) or to a width and/or height (up to 16384 px). An optional Qwen pass restores detail first. |
@@ -93,6 +94,7 @@ Open http://127.0.0.1:7860. Each **tab** is an independent workspace with all th
 | POST | `/api/controlnet/download` | fetch the ControlNet weights (7.55 GB) |
 | POST | `/api/face` | `image` (target), `face` (reference) files, optional `mask`/`selection`, `prompt`, `keep_hair`, `keep_expression`, `keep_outside` |
 | POST | `/api/combine` | `images[]` (2–10), `prompt` |
+| POST | `/api/compose` | `images[]` (the sources), `components` JSON list of `{image, mask?, selection?, label?}` (1–10; `image`/`mask` index into `images[]`/`masks[]`; no mask or selection = whole image), optional `masks[]`, `prompt` |
 | POST | `/api/isolate` | `image`, `mask` file or `selection` JSON, `description`, `method`, `crop`, `clip`, `keep_canvas` |
 | POST | `/api/background` | `image` (subject), `background` files, optional `mask`/`selection`, `prompt`, `method` (`model`/`composite`), `keep_subject` |
 | POST | `/api/upscale` | `image`, one of `scale` / `width` / `height` (width and height together fit the image inside both), `model`, `enhance`, `prompt`, `tile` |
@@ -123,6 +125,7 @@ qwen-image controlnet -p "a knight in silver armour" --type pose --source dancer
 qwen-image detect -i dancer.png --type pose -o pose.png --pose-json pose.json   # edit pose.json, then: controlnet --pose-json pose.json
 qwen-image face -i scene.png --face hero_portrait.png [--box 300,80,420,220] [--transfer-hair] -o scene_hero.png
 qwen-image combine -i cat.png -i hat.png -p "the cat from the first image wearing the hat from the second" -o out.png
+qwen-image compose -c "cat.png|box=40,60,300,400|label=the cat" -c "lamp.png|point=120,90|label=the lamp" -p "on a sofa" -o out.png
 qwen-image isolate -i cartoon.png --polygon "10,10 200,15 190,300 20,280" -d "the knight" -o knight.png
 qwen-image background -i portrait.png --background beach.png [--method composite] -o portrait_beach.png
 qwen-image segment -i photo.png --point 420,310 [--negative 400,200] [--cutout] -o mask.png
